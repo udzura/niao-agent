@@ -1,0 +1,13 @@
+{
+  "name": "niao-agent",
+  "private": true,
+  "workspaces": ["apps/worker"],
+  "scripts": {
+    "dev": "npm run dev -w apps/worker",
+    "test": "npm run test -w apps/worker",
+    "test:macos": "swift test --package-path apps/macos",
+    "typecheck": "npm run typecheck -w apps/worker",
+    "build:worker": "npm run build -w apps/worker",
+    "build:macos": "bash apps/macos/scripts/build.sh"
+  }
+}

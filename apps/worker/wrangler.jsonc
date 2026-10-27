@@ -1,0 +1,11 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "niao-agent",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-27",
+  "compatibility_flags": ["nodejs_compat"],
+  "ai": {"binding": "AI", "remote": true},
+  "durable_objects": {"bindings": [{"name": "NiaoAgent", "class_name": "NiaoAgent"}]},
+  "migrations": [{"tag": "v1", "new_sqlite_classes": ["NiaoAgent"]}],
+  "observability": {"enabled": false}
+}

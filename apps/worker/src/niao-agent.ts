@@ -1,0 +1,190 @@
+import { Agent, type Connection, type ConnectionContext, type WSMessage } from "agents";
+import type { Env } from "./index";
+import { boundedContext, MODEL_ID, WorkersAIModel, type ChatModel, type ModelMessage } from "./model";
+import { ChatError, errorCode, parseSubmission, type Message, type Turn } from "./protocol";
+
+import { UsageAnalytics, utcDay, validNeurons } from "./usage";
+
+type Active = { requestId: string; text: string };
+const log = (event: string, fields: Record<string, unknown> = {}) => console.log(JSON.stringify({event, ...fields}));
+
+export class NiaoAgent extends Agent<Env> {
+  static options = { sendIdentityOnConnect: false };
+  observability = undefined; // SDK event payloads are not part of our safe logging contract.
+  private analytics = new UsageAnalytics(this.env);
+  private active: Active | null = null;
+  private bootId = crypto.randomUUID();
+
+  onStart() {
+    this.sql`CREATE TABLE IF NOT EXISTS niao_messages (
+      seq INTEGER PRIMARY KEY AUTOINCREMENT,
+      id TEXT NOT NULL UNIQUE, requestId TEXT NOT NULL,
+      role TEXT NOT NULL CHECK(role IN ('user','assistant')),
+      content TEXT NOT NULL, createdAt TEXT NOT NULL,
+      UNIQUE(requestId, role)
+    )`;
+    this.sql`CREATE TABLE IF NOT EXISTS niao_turns (
+      requestId TEXT PRIMARY KEY, status TEXT NOT NULL, errorCode TEXT
+    )`;
+    this.sql`CREATE TABLE IF NOT EXISTS niao_usage_attempts (
+      id TEXT PRIMARY KEY, startedAt TEXT NOT NULL, neurons REAL
+    )`;
+    this.sql`CREATE INDEX IF NOT EXISTS niao_usage_day ON niao_usage_attempts(startedAt)`;
+    this.sql`CREATE TABLE IF NOT EXISTS niao_usage_meta (id INTEGER PRIMARY KEY, trackingSince TEXT NOT NULL)`;
+    this.sql`INSERT OR IGNORE INTO niao_usage_meta VALUES (1, ${new Date().toISOString()})`;
+    // A fresh isolate cannot resume an in-flight provider stream. Keep the user message;
+    // require an explicit retry instead of silently charging for another generation.
+    this.sql`UPDATE niao_turns SET status = 'failed', errorCode = 'interrupted' WHERE status = 'running'`;
+    log("agent.started");
+  }
+
+  shouldConnectionBeReadonly() { return true; }
+  shouldSendProtocolMessages() { return false; }
+  onConnect(connection: Connection, _context: ConnectionContext) {
+    this.send(connection, {type: "ready", bootId: this.bootId, active: this.active});
+    log("connection.open", {connectionId: connection.id});
+  }
+  onClose(connection: Connection, code: number) { log("connection.close", {connectionId: connection.id, code}); }
+  onError(_connectionOrError: unknown, _error?: unknown) { log("agent.error", {code: "internal_error"}); }
+
+  async onRequest(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    if (url.pathname.endsWith("/usage")) return this.usageResponse();
+    if (!url.pathname.endsWith("/history")) return new Response("WebSocket upgrade required", {status: 426});
+    const after = Number(url.searchParams.get("after") ?? "0");
+    if (!Number.isSafeInteger(after) || after < 0) return new Response("Invalid cursor", {status: 400});
+    const rows = this.sql<Message>`SELECT * FROM niao_messages WHERE seq > ${after} ORDER BY seq LIMIT 101`;
+    const messages = rows.slice(0, 100);
+    return Response.json({v: 1, messages, cursor: messages.at(-1)?.seq ?? after, hasMore: rows.length > 100,
+      turns: this.sql<Turn>`SELECT * FROM niao_turns WHERE status != 'completed'`, active: this.active,
+    }, {headers: {"Cache-Control": "no-store"}});
+  }
+
+  private async usageResponse(): Promise<Response> {
+    // Retry the date selection if UTC midnight passes during the remote request.
+    let now = new Date();
+    let account = await this.analytics.today(now);
+    if (utcDay(new Date()).dayStart !== utcDay(now).dayStart) {
+      now = new Date();
+      account = await this.analytics.today(now);
+    }
+    const period = utcDay(now);
+    const recorded = this.sql<{neurons: number; attempts: number; unmeasuredAttempts: number}>`
+      SELECT COALESCE(SUM(neurons), 0) AS neurons, COUNT(*) AS attempts,
+        COUNT(*) - COUNT(neurons) AS unmeasuredAttempts FROM niao_usage_attempts
+      WHERE startedAt >= ${period.dayStart} AND startedAt < ${period.dayEnd}`[0];
+    const {trackingSince} = this.sql<{trackingSince: string}>`SELECT trackingSince FROM niao_usage_meta WHERE id = 1`[0];
+    return Response.json({v: 1, ...period, asOf: new Date().toISOString(), account,
+      local: {...recorded, trackingSince}}, {headers: {"Cache-Control": "no-store"}});
+  }
+
+  protected createModel(): ChatModel { return new WorkersAIModel(this.env.AI); }
+
+  async onMessage(connection: Connection, raw: WSMessage) {
+    let requestId: string | undefined;
+    let claimed = false;
+    try {
+      const input = parseSubmission(raw);
+      requestId = input.requestId;
+      const existing = this.sql<Message>`SELECT * FROM niao_messages WHERE requestId = ${requestId} AND role = 'user'`[0];
+      if (existing && existing.content !== input.content) throw new ChatError("id_conflict");
+      const turn = this.sql<Turn>`SELECT * FROM niao_turns WHERE requestId = ${requestId}`[0];
+      if (turn?.status === "completed") {
+        this.send(connection, {type: "committed", requestId, messages: this.sql<Message>`SELECT * FROM niao_messages WHERE requestId = ${requestId} ORDER BY seq`});
+        return;
+      }
+      if (this.active) {
+        if (this.active.requestId === requestId) {
+          this.send(connection, {type: "accepted", requestId, message: existing});
+          this.send(connection, {type: "partial", ...this.active});
+          return;
+        }
+        throw new ChatError("busy");
+      }
+      // No await between checking and claiming the single active turn.
+      this.active = {requestId, text: ""};
+      claimed = true;
+      this.ctx.storage.transactionSync(() => {
+        this.sql`INSERT OR IGNORE INTO niao_messages (id, requestId, role, content, createdAt)
+          VALUES (${input.requestId}, ${input.requestId}, 'user', ${input.content}, ${new Date().toISOString()})`;
+        this.sql`INSERT INTO niao_turns (requestId, status) VALUES (${input.requestId}, 'running')
+          ON CONFLICT(requestId) DO UPDATE SET status = 'running', errorCode = NULL`;
+      });
+      const user = this.sql<Message>`SELECT * FROM niao_messages WHERE id = ${requestId}`[0];
+      this.publish({type: "accepted", requestId, message: user});
+      await this.generate(requestId);
+    } catch (error) {
+      this.send(connection, {type: "error", requestId, code: error instanceof ChatError ? error.code : "internal_error"});
+      log("submission.error", {requestId, code: error instanceof ChatError ? error.code : "internal_error"});
+      if (claimed && this.active?.requestId === requestId) this.active = null;
+    }
+  }
+
+  private async generate(requestId: string) {
+    const start = Date.now();
+    const attemptId = crypto.randomUUID();
+    this.sql`INSERT INTO niao_usage_attempts (id, startedAt) VALUES (${attemptId}, ${new Date(start).toISOString()})`;
+    log("llm.start", {requestId, model: MODEL_ID});
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    // A hard deadline covers binding setup as well as stalled reads. The race prevents
+    // a provider ignoring cancellation from leaving the agent permanently busy.
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => { controller.abort(); reject(new ChatError("ai_timeout")); }, 90_000);
+    });
+    try {
+      const user = this.sql<Message>`SELECT * FROM niao_messages WHERE requestId = ${requestId} AND role = 'user'`[0];
+      const recent = this.sql<ModelMessage>`SELECT m.role, m.content FROM niao_messages m
+        JOIN niao_turns t ON t.requestId = m.requestId
+        WHERE t.status = 'completed' AND m.seq < ${user.seq}
+        ORDER BY m.seq DESC LIMIT 23`.reverse();
+      // Retrying an old failed turn must still include that user message, even
+      // when many newer completed messages exist. Reuse its original context.
+      recent.push({role: "user", content: user.content});
+      let text = "";
+      let usage: Record<string, number> = {};
+      const consume = async () => {
+        for await (const part of this.createModel().stream(boundedContext(recent), controller.signal)) {
+          controller.signal.throwIfAborted();
+          if ("text" in part) {
+            text += part.text;
+            if (text.length > 64_000) throw new ChatError("response_too_large");
+            this.active = {requestId, text};
+            // Full transient snapshot makes duplicate/out-of-order replay unnecessary.
+            this.publish({type: "partial", requestId, text});
+          } else {
+            usage = {...usage, ...part.usage};
+            if (validNeurons(part.usage.neurons)) {
+              // Each provider usage frame is a cumulative total, not a delta.
+              // Save before final message commit, including failed/empty responses.
+              this.sql`UPDATE niao_usage_attempts SET neurons = ${part.usage.neurons} WHERE id = ${attemptId}`;
+            }
+          }
+        }
+      };
+      await Promise.race([consume(), timeout]);
+      if (!text.trim()) throw new ChatError("empty_ai_response");
+      this.ctx.storage.transactionSync(() => {
+        this.sql`INSERT INTO niao_messages (id, requestId, role, content, createdAt)
+          VALUES (${`assistant:${requestId}`}, ${requestId}, 'assistant', ${text}, ${new Date().toISOString()})`;
+        this.sql`UPDATE niao_turns SET status = 'completed', errorCode = NULL WHERE requestId = ${requestId}`;
+      });
+      this.publish({type: "committed", requestId, messages: this.sql<Message>`SELECT * FROM niao_messages WHERE requestId = ${requestId} ORDER BY seq`});
+      log("llm.complete", {requestId, model: MODEL_ID, durationMs: Date.now() - start, usage});
+    } catch (error) {
+      const code = errorCode(error);
+      this.sql`UPDATE niao_turns SET status = 'failed', errorCode = ${code} WHERE requestId = ${requestId}`;
+      this.publish({type: "error", requestId, code});
+      log("llm.error", {requestId, model: MODEL_ID, durationMs: Date.now() - start, code});
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      controller.abort();
+      this.active = null;
+    }
+  }
+
+  private send(connection: Connection, event: object) {
+    try { connection.send(JSON.stringify({v: 1, ...event})); } catch { /* Reconnect uses HTTP history. */ }
+  }
+  private publish(event: object) { for (const connection of this.getConnections()) this.send(connection, event); }
+}

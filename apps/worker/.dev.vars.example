@@ -1,0 +1,2 @@
+# Generate a random value: openssl rand -hex 32
+NIAO_TOKEN=

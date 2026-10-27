@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>Niao — a small, curious bird</title>
+  <rect x="80" y="96" width="848" height="848" rx="190" fill="#623E35"/>
+  <rect x="64" y="64" width="848" height="848" rx="190" fill="#BE6346"/>
+  <path d="M238 552 L340 581 C334 505 410 438 508 450 C499 382 546 326 610 326 C667 326 710 363 717 409 L789 446 L716 478 C707 590 628 674 509 688 C403 700 302 650 238 552 Z" fill="#FFF9EE"/>
+  <path d="M402 528 C438 507 500 512 552 540 C524 589 470 609 424 579 C408 568 400 549 402 528 Z" fill="#BE6346"/>
+</svg>
