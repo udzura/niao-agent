@@ -2,6 +2,7 @@ import { routeAgentRequest } from "agents";
 import { authenticated } from "./auth";
 export { NiaoAgent } from "./niao-agent";
 export interface Env {
+  RUBY_RUNNER: Service<import("../../ruby-runner/src/index").default>;
   NiaoAgent: DurableObjectNamespace;
   AI: Ai;
   NIAO_TOKEN: string;

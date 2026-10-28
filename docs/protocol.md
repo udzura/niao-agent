@@ -41,13 +41,14 @@ Use a UUID and preserve it for retries. Content is trimmed and must contain 1–
 | `accepted` | `requestId`, `message` | User row is durable; do not create another local duplicate. |
 | `partial` | `requestId`, `text` | Replace transient assistant text with this **cumulative** snapshot. Not a delta or committed row. |
 | `committed` | `requestId`, `messages` | Durable user/assistant pair. Merge by ID and clear transient display. |
+| `tool_status` | `requestId`, `name`, `status` | Transient tool activity (`running` or `completed`); no code/output is sent to the UI. |
 | `settings_updated` | `settings` | Persisted model selection changed. |
 | `history_cleared` | `epoch` | Reset local conversation, cursor, transient output, and old outbox. |
 | `error` | optional `requestId`, `code` | Request rejected or generation failed. Discard transient text; synchronize history. |
 
 All server frames include `v:1` and the current `epoch`. Accepted/partial/committed/generation-error events broadcast to connected clients. An individual retry of an existing completed turn returns its pair only to the requester. Validation and busy errors also go only to the requester. Connections use the base SDK's hibernation support; no application RPC is exposed.
 
-Error codes: `invalid_message`, `id_conflict`, `busy`, `interrupted`, `ai_rate_limited`, `ai_timeout`, `ai_unavailable`, `invalid_ai_response`, `incomplete_ai_stream`, `empty_ai_response`, `response_too_large`, `internal_error`. Some provider quota errors do not supply a numeric HTTP status and are safely classified as `ai_unavailable`; the raw provider error is intentionally withheld.
+Error codes: `tool_limit`, `invalid_tool_call`, `invalid_message`, `id_conflict`, `busy`, `interrupted`, `ai_rate_limited`, `ai_timeout`, `ai_unavailable`, `invalid_ai_response`, `incomplete_ai_stream`, `empty_ai_response`, `response_too_large`, `internal_error`. Some provider quota errors do not supply a numeric HTTP status and are safely classified as `ai_unavailable`; the raw provider error is intentionally withheld.
 
 A failed turn can be retried with the same ID and identical trimmed content. A running duplicate cannot start another generation. Completed duplicates do not call the model. There is no cancel, edit, or regeneration command. Whole-history deletion is available over HTTP. Partial stream replay is intentionally not durable: after a connection interruption, HTTP and `ready` provide the latest active snapshot or completed history; after an isolate crash the user explicitly retries an interrupted turn.
 

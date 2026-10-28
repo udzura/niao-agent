@@ -1,6 +1,6 @@
 # Lessons for a future Pondro implementation
 
-This implementation contains no Ruby, mruby, PicoRuby, or Pondro runtime. It is a reference for later integration.
+The Agent runtime remains TypeScript. A subsequent Niao-owned tool adds an isolated PicoRuby evaluator; no Pondro runtime is introduced.
 
 | Responsibility | Owner here | Reusable lesson |
 | --- | --- | --- |
@@ -25,3 +25,9 @@ Later phases can add discovery, scheduling, memory, or tools without moving thes
 
 10. Mutable model selection belongs to persistent application configuration. Snapshot it before asynchronous generation so an in-flight response cannot accidentally mix providers after a settings change.
 11. History deletion needs a durable generation/epoch as well as sequence cursors. Fence old offline submissions and in-flight sync responses, and make destructive retries conditional on the epoch. Keep billing observations separate from conversation lifecycle.
+
+12. A computation tool needs independent budgets at VM, memory, output, and host CPU boundaries. Ruby exceptions are unsuitable for non-bypassable fuel exhaustion: trap the Wasm invocation and discard its instance. Native methods and compilation require a host CPU boundary even with bytecode fuel.
+
+13. A static Worker plus Service Binding can host an immutable Wasm module without Worker Loader, while recreating mutable VM state for every RPC. The tool schema and persistence policy can remain unchanged during this hosting migration.
+14. Service separation is capability organization, not a replacement for untrusted-code isolation or preemption. Removing a Dynamic Worker also removes its outbound policy and explicit CPU budget. Document those losses; do not disguise an await timeout as cancellation of synchronous Wasm.
+15. Measure Wasm instantiation, VM initialization, compilation, evaluation, and serialization separately. A low warm median can hide a first invocation close to the Free CPU ceiling. Workers elapsed clocks are not CPU meters; local thread CPU measurements need hosted validation. Preserve a reproducible benchmark and its provenance alongside runtime changes.

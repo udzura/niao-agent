@@ -43,7 +43,9 @@ export function parseAccountNeurons(value: unknown): number {
 export class UsageAnalytics {
   private cache?: {day: string; expires: number; value: AccountUsage};
   private inFlight?: {day: string; promise: Promise<AccountUsage>};
-  constructor(private env: AnalyticsEnv, private request: typeof fetch = fetch) {}
+  // Workers global fetch requires its global receiver. Keeping it as an unbound
+  // property and calling this.request() throws Illegal invocation before any HTTP.
+  constructor(private env: AnalyticsEnv, private request: typeof fetch = fetch.bind(globalThis)) {}
   async today(now = new Date()): Promise<AccountUsage> {
     if (!this.env.CF_ACCOUNT_ID || !this.env.CF_ANALYTICS_TOKEN) {
       return {status: "not_configured", neurons: null, queriedAt: null, errorCode: "analytics_not_configured"};
@@ -60,19 +62,47 @@ export class UsageAnalytics {
   }
   private async query(now: Date): Promise<AccountUsage> {
     const {dayStart} = utcDay(now);
+    let phase = "configuration";
+    let httpStatus: number | undefined;
+    const started = Date.now();
     try {
       if (!/^[a-f0-9]{32}$/i.test(this.env.CF_ACCOUNT_ID!)) throw new AnalyticsError("analytics_configuration_invalid");
+      phase = "fetch";
       const response = await this.request("https://api.cloudflare.com/client/v4/graphql", {
-        method: "POST", redirect: "error", signal: AbortSignal.timeout(8_000),
+        // Workers supports follow/manual only. Never follow a redirect with this credential.
+        method: "POST", redirect: "manual", signal: AbortSignal.timeout(8_000),
         headers: {"Content-Type": "application/json", Authorization: `Bearer ${this.env.CF_ANALYTICS_TOKEN}`},
         body: JSON.stringify({query: USAGE_QUERY, variables: {account: this.env.CF_ACCOUNT_ID, start: dayStart, end: now.toISOString()}}),
       });
-      if (!response.ok) throw new AnalyticsError(response.status === 429 ? "analytics_rate_limited" : "analytics_unavailable");
-      return {status: "available", neurons: parseAccountNeurons(await response.json()), queriedAt: now.toISOString(), errorCode: null};
+      httpStatus = response.status;
+      if (!response.ok) {
+        await response.body?.cancel();
+        throw new AnalyticsError(response.status === 429 ? "analytics_rate_limited" : `analytics_http_${response.status}`);
+      }
+      phase = "decode";
+      const body = await response.json();
+      phase = "graphql";
+      return {status: "available", neurons: parseAccountNeurons(body), queriedAt: now.toISOString(), errorCode: null};
     } catch (error) {
-      // Never expose API token, account ID, GraphQL errors, or arbitrary provider bodies.
+      const name = error instanceof Error ? error.name : "UnknownError";
+      const code = error instanceof AnalyticsError ? error.message
+        : name === "TimeoutError" || name === "AbortError" ? "analytics_timeout"
+        : phase === "decode" ? "analytics_invalid_json" : "analytics_fetch_failed";
+      // No headers, query variables, stack traces or upstream response bodies.
+      // Fetch/runtime messages help diagnose e.g. Illegal invocation; redact secrets
+      // and identifiers before truncating, including encoded representations.
+      const redact = (value: string) => {
+        for (const secret of [this.env.CF_ANALYTICS_TOKEN, this.env.CF_ACCOUNT_ID]) {
+          if (secret) for (const variant of [secret, encodeURIComponent(secret), JSON.stringify(secret).slice(1,-1)]) {
+            value = value.split(variant).join("[redacted]");
+          }
+        }
+        return value.replace(/Bearer\s+[^\s"']+/gi, "Bearer [redacted]").replace(/[\r\n\t]/g," ").slice(0,500);
+      };
+      console.warn(JSON.stringify({event:"analytics.error",code,phase,httpStatus,durationMs:Date.now()-started,
+        errorType:redact(name),message:redact(error instanceof Error ? error.message : "Non-Error exception")}));
       return {status: "unavailable", neurons: null, queriedAt: null,
-        errorCode: error instanceof AnalyticsError ? error.message : "analytics_unavailable"};
+        errorCode: code};
     }
   }
 }

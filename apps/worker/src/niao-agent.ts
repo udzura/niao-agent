@@ -1,3 +1,4 @@
+import { rubyExecutor } from "./ruby/tool";
 import { Agent, type Connection, type ConnectionContext, type WSMessage } from "agents";
 import type { Env } from "./index";
 import { boundedContext, DEFAULT_MODEL, MODELS, isModelID, type ModelID, WorkersAIModel, type ChatModel, type ModelMessage } from "./model";
@@ -116,7 +117,7 @@ export class NiaoAgent extends Agent<Env> {
   }
   private settingsResponse() { return {v: 1, ...this.settings(), models: MODELS}; }
   private json(data: object, status = 200) { return Response.json(data, {status, headers: {"Cache-Control": "no-store"}}); }
-  protected createModel(modelId: ModelID): ChatModel { return new WorkersAIModel(this.env.AI, modelId); }
+  protected createModel(modelId: ModelID): ChatModel { return new WorkersAIModel(this.env.AI, modelId, rubyExecutor(this.env.RUBY_RUNNER)); }
 
   async onMessage(connection: Connection, raw: WSMessage) {
     let requestId: string | undefined;
@@ -162,7 +163,7 @@ export class NiaoAgent extends Agent<Env> {
   private async generate(requestId: string) {
     const modelId = this.settings().modelId; // Snapshot once: settings changes affect subsequent turns.
     const start = Date.now();
-    const attemptId = crypto.randomUUID();
+    let attemptId = crypto.randomUUID();
     this.sql`INSERT INTO niao_usage_attempts (id, startedAt) VALUES (${attemptId}, ${new Date(start).toISOString()})`;
     log("llm.start", {requestId, model: modelId});
     const controller = new AbortController();
@@ -192,7 +193,14 @@ export class NiaoAgent extends Agent<Env> {
             this.active = {requestId, text};
             // Full transient snapshot makes duplicate/out-of-order replay unnecessary.
             this.publish({type: "partial", requestId, text});
-          } else {
+          } else if ("inferenceStarted" in part) {
+            attemptId = crypto.randomUUID();
+            usage = {};
+            this.sql`INSERT INTO niao_usage_attempts (id, startedAt) VALUES (${attemptId}, ${new Date().toISOString()})`;
+          } else if ("toolStatus" in part) {
+            this.publish({type:"tool_status",requestId,name:"ruby_eval",status:part.toolStatus});
+            log("tool.execution", {requestId,name:"ruby_eval",status:part.toolStatus});
+          } else if ("usage" in part) {
             usage = {...usage, ...part.usage};
             if (validNeurons(part.usage.neurons)) {
               // Each provider usage frame is a cumulative total, not a delta.

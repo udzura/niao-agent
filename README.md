@@ -7,7 +7,8 @@ macOS に住むパーソナル AI コンパニオンの Phase 1。SwiftUI のネ
 - HTTP と WebSocket upgrade の Bearer 認証、macOS Keychain 保存
 - 切断時の指数バックオフ、スリープ・復帰、20 秒ごとの履歴照合
 - モデル: Gemma 4（既定）/ GLM 4.7 Flash を設定画面・APIから切り替え可能
-- チャット履歴の削除（モデル設定・使用量は保持）。ニュース収集、ツール、定期実行、長期記憶は含みません
+- チャット履歴の削除（モデル設定・使用量は保持）。ニュース収集、定期実行、長期記憶は含みません
+- 制限付きPicoRubyツールで計算・文字列処理（外部I/Oなし）
 
 ## 構成
 
@@ -21,6 +22,9 @@ apps/
     Tests/
     Smoke/                  # 実際の URLSession で行う E2E 検証
     scripts/{build,smoke}.sh
+  ruby-runner/              # 固定Worker / Service Binding RPC / PicoRuby Wasm
+    src/generated/          # 同梱済みJS・Wasm
+    wrangler.jsonc
   worker/
     src/{index,auth,niao-agent,model,protocol}.ts
     test/
@@ -65,7 +69,7 @@ openssl rand -hex 32
 npm run dev
 ```
 
-`http://127.0.0.1:8787` で待機します。DO と SQLite はローカル、`AI` binding は **実際の Cloudflare Workers AI** に接続するため、ログインとインターネット接続が必要で、推論の利用量が発生します。認証・モデル失敗時に模擬応答へ置き換えることはありません。
+AgentとRuby Runnerの2つのWorkerが起動し、Agentが `http://127.0.0.1:8787` で待機します。RunnerはService Bindingから利用します。DO と SQLite はローカル、`AI` binding は **実際の Cloudflare Workers AI** に接続するため、ログインとインターネット接続が必要で、推論の利用量が発生します。認証・モデル失敗時に模擬応答へ置き換えることはありません。
 
 Wrangler の同じ作業ディレクトリで起動し続ける限り、再起動後も `.wrangler/state/` に履歴が残ります。ローカル開発は loopback に限定しています。Wrangler の開発用 Local Explorer はアプリの認証境界とは別なので、開発サーバーを公開ネットワークにバインドしないでください。
 
@@ -105,11 +109,14 @@ open apps/macos/build/Build/Products/Debug/Niao.app
 - `NiaoAgent` の Durable Object binding
 - `v1` migration の `new_sqlite_classes: ["NiaoAgent"]`
 - `AI` binding
+- 固定Worker `niao-ruby-runner` への `RUBY_RUNNER` Service Binding
 - `nodejs_compat` と compatibility date
 
 複数アカウントを使う場合は適切な `account_id` を設定してください。モデルは `src/model.ts` に隔離しています。Workers AI 用の API キーをアプリに渡す必要はありません。
 
 ```sh
+# リポジトリルートで、Runnerを先に同じアカウントへ配置する
+npm run deploy -w @niao/ruby-runner
 cd apps/worker
 npx wrangler secret put NIAO_TOKEN
 # 32 文字以上のランダムな本番専用トークンを対話入力する
@@ -138,6 +145,14 @@ npm run deploy
 
 日次は UTC 基準（日本時間 9:00 リセット）です。未設定・取得失敗時には「Niao 記録分」を区別して表示します。具体的なトークン作成、ローカル設定、GraphQL クエリ、エラーの確認方法は [使用量の設定手順](docs/usage.md) を参照してください。
 
+## Rubyツール
+
+Gemma / GLMが必要に応じて`ruby_eval`を呼び、計算結果を使って回答します。例えば「Rubyで1から100までの二乗の和を計算して」と依頼できます。アプリには実行中の表示が出ます。
+
+専用の固定Worker `niao-ruby-runner` をService Binding RPCで呼びます。Worker Loaderへの依存はなく、追加シークレットも不要です。Rubyへネットワーク・ファイル・環境変数を渡さず、命令数・Wasmメモリ・出力を制限します。ただし、同期C処理を強制中断するアプリ側の仕組みはありません。
+
+軽量処理はローカルで動作確認済みですが、Freeプランの10ms CPU制限に対する本番動作は未確認です。Runnerを先に、次にAgentをデプロイしてください。今回の移行によるアプリの更新は不要です。具体的な制約、計測結果、ローカル開発・デプロイ手順は [Rubyツール](docs/ruby-tool.md) を参照してください。
+
 ## アプリアイコン
 
 オリジナルの鳥の SVG を `apps/macos/Artwork/Niao.svg` に保存しています。PNG の各解像度もリポジトリに含まれるため、通常のビルドに画像ツールは不要です。SVG を変更した場合は ImageMagick を入れて `python3 apps/macos/scripts/generate-icon.py` で再生成できます。既存のメニューバーの SF Symbols は UI 内で使用し、Dock のアプリアイコンには独自の図形を使用しています。[Apple の SF Symbols 利用案内](https://developer.apple.com/design/human-interface-guidelines/sf-symbols)
@@ -147,6 +162,8 @@ npm run deploy
 ```sh
 npm run typecheck
 npm test                         # workerd の実 Agent / SQLite。モデルのみテスト用 fixture
+npm run build:runner             # Ruby Runnerのdry-run
+npm run bench:ruby               # ローカルCPU計測（AIを呼ばない）
 npm run build:worker             # wrangler deploy --dry-run。アップロードしない
 npm run build:macos
 swift test --package-path apps/macos

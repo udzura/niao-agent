@@ -35,7 +35,7 @@ struct ChatView: View {
                         }
                         if store.busy {
                             VStack(alignment: .leading, spacing: 8) {
-                                HStack { ProgressView().controlSize(.small); Text("Niao · 生成中").font(.caption).foregroundStyle(.secondary) }
+                                HStack { ProgressView().controlSize(.small); Text(store.toolRunning ? "Niao · Rubyで計算中" : "Niao · 生成中").font(.caption).foregroundStyle(.secondary) }
                                 if let text = store.partial?.text, !text.isEmpty { Text(text).textSelection(.enabled) }
                             }.padding(12).frame(maxWidth: .infinity, alignment: .leading)
                                 .background(.quaternary, in: RoundedRectangle(cornerRadius: 12))

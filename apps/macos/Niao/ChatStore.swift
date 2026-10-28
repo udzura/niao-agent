@@ -6,6 +6,7 @@ import Foundation
 final class ChatStore: ObservableObject {
     @Published var agentSettings: AgentSettings?
     @Published var controlBusy = false
+    @Published var toolRunning = false
     private var historyEpoch: Int?
     @Published var messages: [ChatMessage] = []
     @Published var usage: UsageSnapshot?
@@ -71,6 +72,7 @@ final class ChatStore: ObservableObject {
     private func disconnect() {
         generation = UUID()
         controlBusy = false
+        toolRunning = false
         usageTask?.cancel(); usageTask = nil; usageLoading = false
         backend = nil
         loop?.cancel(); loop = nil
@@ -141,7 +143,7 @@ final class ChatStore: ObservableObject {
                 }
             } catch {
                 guard generation == id, !Task.isCancelled else { return }
-                connected = false; partial = nil; connection = "未接続"
+                connected = false; partial = nil; toolRunning = false; connection = "未接続"
                 self.error = error.localizedDescription
                 heartbeat?.cancel(); heartbeat = nil
                 socket?.cancel(with: .goingAway, reason: nil); socket = nil
@@ -177,6 +179,7 @@ final class ChatStore: ObservableObject {
         guard acceptEpoch(event.epoch ?? 0) else { return }
         eventRevision += 1
         switch event.type {
+        case "tool_status": toolRunning = event.status == "running"
         case "history_cleared": break // acceptEpoch already reset the local conversation.
         case "settings_updated": agentSettings = event.settings
         case "accepted":
@@ -189,12 +192,14 @@ final class ChatStore: ObservableObject {
         case "partial":
             if let requestID = event.requestId { partial = PartialMessage(requestId: requestID, text: event.text ?? "") }
         case "committed":
+            toolRunning = false
             messages = mergeMessages(messages, event.messages ?? [])
             turns.removeAll { $0.requestId == event.requestId }
             if partial?.requestId == event.requestId { partial = nil }
             if outbox?.requestId == event.requestId { clearOutbox() }
             refreshUsage()
         case "error":
+            toolRunning = false
             refreshUsage()
             error = explanation(event.code ?? "unknown")
             if let requestID = event.requestId {

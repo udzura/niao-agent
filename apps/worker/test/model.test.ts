@@ -45,3 +45,48 @@ describe("Workers AI adapter", () => {
     expect(await authenticated(req, "a".repeat(32))).toBe(true);
   });
 });
+
+describe('bounded native tool calling', () => {
+  const frame = (delta: unknown) => `data: ${JSON.stringify({choices:[{delta}]})}\n\n`;
+  it('assembles split arguments, returns tool output to the selected model, and streams the answer', async () => {
+    const requests: any[] = [];
+    const ai = {run:async (_model: string,input: any) => {
+      requests.push(JSON.parse(JSON.stringify(input)));
+      return stream(requests.length === 1
+        ? frame({tool_calls:[{index:0,id:'call_1',function:{name:'ruby_eval',arguments:'{"code":"6*'}}]}) + frame({tool_calls:[{index:0,id:null,function:{name:null,arguments:'7"}'}}]}) + 'data: [DONE]\n\n'
+        : frame({content:'42です。',tool_calls:null}) + 'data: [DONE]\n\n');
+    }} as unknown as Ai;
+    const executed: string[] = [];
+    const adapter = new WorkersAIModel(ai,'@cf/google/gemma-4-26b-a4b-it',async code => {executed.push(code); return {ok:true,value:'42'};});
+    const events = [];
+    for await (const e of adapter.stream([{role:'user',content:'計算して'}],new AbortController().signal)) events.push(e);
+    expect(executed).toEqual(['6*7']);
+    expect(requests[1].messages.at(-1)).toEqual({role:'tool',tool_call_id:'call_1',content:'{"ok":true,"value":"42"}'});
+    expect(events).toContainEqual({text:'42です。'});
+    expect(events.filter(e => 'inferenceStarted' in e)).toHaveLength(1);
+  });
+  it('never dispatches unknown tools and stops repeated tool calls at the budget', async () => {
+    let requests = 0, executions = 0;
+    const ai = {run:async () => { requests++; return stream(frame({tool_calls:[{index:0,id:'call_'+requests,function:{name:requests === 1 ? 'fetch' : 'ruby_eval',arguments:'{"code":"1"}'}}]})+'data: [DONE]\n\n'); }} as unknown as Ai;
+    const adapter = new WorkersAIModel(ai,'@cf/zai-org/glm-4.7-flash',async () => {executions++; return {ok:true,value:'1'};});
+    await expect((async () => {for await (const e of adapter.stream([],new AbortController().signal)) { /* consume */ }})()).rejects.toThrow('tool_limit');
+    expect(requests).toBe(4); expect(executions).toBe(2);
+  });
+});
+
+it('executes the advertised tool through the real static Runner RPC and returns its value to the model', async () => {
+  const {env} = await import('cloudflare:test');
+  const {rubyExecutor} = await import('../src/ruby/tool');
+  let round = 0;
+  const ai = {run:async (_model: string,input: any) => {
+    if (round++ === 0) return stream('data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"ruby_call","function":{"name":"ruby_eval","arguments":"{\\"code\\":\\"1 + 1\\"}"}}]}}]}\n\ndata: [DONE]\n\n');
+    const tool = input.messages.at(-1);
+    expect(tool.role).toBe('tool');
+    expect(JSON.parse(tool.content)).toMatchObject({ok:true,value:'2'});
+    return stream('data: {"choices":[{"delta":{"content":"2"}}]}\n\ndata: [DONE]\n\n');
+  }} as unknown as Ai;
+  const adapter = new WorkersAIModel(ai,'@cf/zai-org/glm-4.7-flash',rubyExecutor((env as any).RUBY_RUNNER));
+  const events = [];
+  for await (const event of adapter.stream([],new AbortController().signal)) events.push(event);
+  expect(round).toBe(2); expect(events).toContainEqual({text:'2'});
+});

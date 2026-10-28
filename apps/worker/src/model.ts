@@ -1,3 +1,4 @@
+import { rubyTool, type RubyExecutor } from "./ruby/tool";
 import { ChatError } from "./protocol";
 export const MODELS = [
   {id: "@cf/google/gemma-4-26b-a4b-it", name: "Gemma 4 · 26B A4B"},
@@ -9,22 +10,74 @@ export function isModelID(value: unknown): value is ModelID {
   return MODELS.some(model => model.id === value);
 }
 export type ModelMessage = { role: "system" | "user" | "assistant"; content: string };
-export type ModelEvent = { text: string } | { usage: Record<string, number> };
+export type ToolCall = {id: string; type: "function"; function: {name: string; arguments: string}};
+export type ModelEvent = { text: string } | { usage: Record<string, number> } | { toolDelta: any[] } | { inferenceStarted: true } | { toolStatus: "running" | "completed" };
 export interface ChatModel {
   stream(messages: ModelMessage[], signal: AbortSignal): AsyncIterable<ModelEvent>;
 }
 
 // The only module aware of Workers AI's provider-specific input and SSE format.
 export class WorkersAIModel implements ChatModel {
-  constructor(private ai: Ai, private modelId: ModelID) { }
+  constructor(private ai: Ai, private modelId: ModelID, private executeRuby?: RubyExecutor) { }
   async *stream(messages: ModelMessage[], signal: AbortSignal): AsyncIterable<ModelEvent> {
-    const result = await this.ai.run(this.modelId, {
-      messages, stream: true, max_completion_tokens: 2048,
-      chat_template_kwargs: { enable_thinking: false },
-      stream_options: { include_usage: true },
-    }, { signal });
-    if (!(result instanceof ReadableStream)) throw new ChatError("invalid_ai_response");
-    yield* parseSSE(result, signal);
+    const conversation: any[] = [...messages];
+    let executions = 0;
+    for (let round = 0; round < 4; round++) {
+      signal.throwIfAborted();
+      if (round) yield {inferenceStarted:true};
+      const started = Date.now();
+      const result = await this.ai.run(this.modelId, {
+        messages: conversation, stream: true, max_completion_tokens: 2048,
+        chat_template_kwargs: { enable_thinking: false },
+        stream_options: { include_usage: true },
+        ...(this.executeRuby ? {tools:[rubyTool], parallel_tool_calls:false, tool_choice:round === 3 ? "none" : "auto"} : {}),
+      }, { signal });
+      if (!(result instanceof ReadableStream)) throw new ChatError("invalid_ai_response");
+      const calls = new Map<number, ToolCall>();
+      let content = "";
+      for await (const event of parseSSE(result, signal)) {
+        if ("toolDelta" in event) {
+          for (const delta of event.toolDelta) {
+            if (!Number.isInteger(delta.index) || delta.index < 0 || delta.index > 2) throw new ChatError("invalid_tool_call");
+            const call = calls.get(delta.index) ?? {id:"",type:"function" as const,function:{name:"",arguments:""}};
+            if (delta.id != null) {
+              if (typeof delta.id !== "string" || delta.id.length > 128) throw new ChatError("invalid_tool_call");
+              call.id = delta.id;
+            }
+            for (const field of ["name", "arguments"] as const) {
+              const part = delta.function?.[field];
+              if (part != null && typeof part !== "string") throw new ChatError("invalid_tool_call");
+              call.function[field] += part ?? "";
+            }
+            if (call.function.name.length > 64 || call.function.arguments.length > 12000) throw new ChatError("invalid_tool_call");
+            calls.set(delta.index,call);
+          }
+        } else {
+          if ("text" in event) content += event.text;
+          yield event;
+        }
+      }
+      console.log(JSON.stringify({event:"llm.request.complete",model:this.modelId,round,durationMs:Date.now()-started}));
+      if (!calls.size) return;
+      if (!this.executeRuby || round === 3 || executions + calls.size > 3) throw new ChatError("tool_limit");
+      const toolCalls = [...calls.values()];
+      if (toolCalls.some(c => !c.id) || new Set(toolCalls.map(c => c.id)).size !== toolCalls.length) throw new ChatError("invalid_tool_call");
+      conversation.push({role:"assistant",content:content || null,tool_calls:toolCalls});
+      for (const call of toolCalls) {
+        signal.throwIfAborted();
+        executions++;
+        let output: unknown = {ok:false,error:"invalid_tool_arguments"};
+        let args;
+        try { args = JSON.parse(call.function.arguments); } catch { /* Safe error to model. */ }
+        if (call.function.name === "ruby_eval" && args && typeof args.code === "string" && Object.keys(args).length === 1) {
+          yield {toolStatus:"running"};
+          output = await this.executeRuby(args.code,signal);
+          signal.throwIfAborted();
+          yield {toolStatus:"completed"};
+        }
+        conversation.push({role:"tool",tool_call_id:call.id,content:JSON.stringify(output)});
+      }
+    }
   }
 }
 
@@ -53,6 +106,11 @@ export async function* parseSSE(stream: ReadableStream<Uint8Array>, signal: Abor
         let chunk;
         try { chunk = JSON.parse(data); } catch { throw new ChatError("invalid_ai_response"); }
         if (chunk.error) throw new ChatError(chunk.error.code === 429 ? "ai_rate_limited" : "ai_unavailable");
+        const deltas = chunk.choices?.[0]?.delta?.tool_calls;
+        if (deltas != null) {
+          if (!Array.isArray(deltas)) throw new ChatError("invalid_tool_call");
+          yield {toolDelta:deltas};
+        }
         const text = chunk.choices?.[0]?.delta?.content ?? chunk.response;
         if (typeof text === "string" && text) yield { text };
         if (chunk.usage) {

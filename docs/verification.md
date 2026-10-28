@@ -69,3 +69,44 @@ Wrangler and Xcode initially encountered this execution environment's filesystem
 - Tests initially exposed undrained test HTTP response bodies blocking Durable Object eviction; consuming those responses fixed the test harness. Swift's generic function scope restriction was also resolved before successful builds.
 - New settings/cleanup GUI interaction and model switching against live Workers AI were not automated. No production deployment or deletion of existing user conversation data was performed.
 - Manual follow-up: update both Worker and app, change model in Settings and send a message, relaunch to verify selection, then use a disposable conversation to check the trash confirmation and empty history after reconnect. A second connected client should reflect both operations. Usage should remain unchanged by cleanup.
+
+## PicoRuby tool follow-up — 2026-10-28 (historical Dynamic Worker implementation)
+
+- Niao-owned build configuration and C extension built against the pinned PicoRuby/compiler/mruby/Prism revisions in `tools/ruby-sandbox/sources.json`; Emscripten 6.0.13. Source checkouts were copied into Niao before building, and no upstream sources were edited.
+- All 39 backend tests pass. Twelve tests execute the real generated Wasm via the real Worker Loader: calculation, exact instruction-budget traps (including rescue/retry and ensure), recursion, memory and output limits, syntax errors, external capabilities, and fresh-instance state isolation. Additional adapter/Agent tests cover streamed function arguments, nullable provider fields, round limits, unknown tools and per-inference usage accounting.
+- Swift's 7 tests pass, and the macOS application builds with the Ruby activity label. Interactive GUI operation was not automated.
+- TypeScript typecheck and Wrangler deployment dry-run pass with the Worker Loader binding and bundled Wasm (~871 KiB uncompressed Wasm). No production deployment was performed.
+- Live test used a separate local SQLite persistence directory and real remote Workers AI. Both Gemma 4 and GLM 4.7 Flash invoked `ruby_eval` once and returned the verified sum of squares, 338350. Gemma produced 13 partial events and GLM 3. The development server was stopped after verification. Existing user conversation data was not cleared or modified.
+- Local live testing exposed nullable `tool_calls`/function fields in the provider SSE; handling and a regression fixture were added. One development-server reload interrupted an earlier smoke run; the final verification ran after reload and passed.
+- Production Dynamic Worker CPU enforcement, account availability, billing and hosted lifecycle remain unverified. Local tests prove VM instruction traps and fixed Wasm memory behavior; they do not stand in for production CPU-limit enforcement.
+
+## Static Runner migration — 2026-10-28
+
+- Moved generated Wasm/JS and the reusable execution wrapper into `apps/ruby-runner/`; replaced Worker Loader with `RUBY_RUNNER.execute()` via Service Binding. The `ruby_eval` schema and tool result shape remain compatible. Existing SwiftUI changes from the previous feature were not modified by this migration.
+- Rebuilt PicoRuby with Niao-owned phase instrumentation. Upstream checkouts remain unchanged. Both TypeScript workspaces pass typechecking.
+- All **44 tests** pass. Tests build the actual Runner bundle and load it as a second workerd Worker. Coverage includes basic arithmetic, stdout, syntax/runtime errors, trapped infinite loops including rescue/ensure, memory/output limits, invalid RPC input, class/global isolation, HTTP 404, compatible tool results, and a model fixture → real Service Binding RPC → real Wasm → model fixture round trip. No AI inference charges were needed for migration tests.
+- Wrangler multi-worker dev started with the Agent and Runner. A separate local-only smoke Worker calling the actual application tool adapter via the same Runner Service Binding returned `{ok:true,value:"2",instructions:3,stdout:""}`. No production deployment was performed.
+- Agent and Runner deployment dry-runs pass. Runner has no bindings, secrets, public workers.dev URL or preview URL; the Agent bundle no longer contains the Ruby Wasm. Service Binding does not impose a host network denial policy.
+- `npm run bench:ruby` measured local Node/V8 thread CPU and per-stage wall time. Final raw results: [ruby-static-local.json](benchmarks/ruby-static-local.json). Warm CPU medians: arithmetic 0.366ms, stdout 0.407ms, sum100 0.397ms, sum1000 0.889ms, fuel exhaustion 2.791ms. First arithmetic call: 9.107ms (another run: 10.018ms). Module load: 4.822ms CPU, separately measured.
+- **Unmet acceptance condition:** hosted Workers Free cold/warm CPU-limit validation. Local workerd does not enforce the production CPU budget, Node timing excludes RPC overhead, and deployment is not authorized. Removal of paid-only features/build success is not evidence of Free-plan runtime reliability. The current evidence supports lightweight-workload experimentation, not a guarantee.
+- Security limitations: no preemptive application timeout for C/compiler work, no equivalent of the removed outbound policy, and no immediate whole-isolate memory reclamation. Fixed Wasm memory and instruction traps remain verified. See [ruby-tool.md](ruby-tool.md) for mitigation choices and deployment order.
+
+## Analytics fetch receiver fix — 2026-10-28
+
+- Reproduced `Illegal invocation` in the real Workers runtime when global `fetch` was stored unbound and called as an Analytics instance property. This failed before any HTTP request; token permissions were not the cause of this code path.
+- Bound the default fetch implementation to `globalThis`. Added a native-fetch regression test that exercises the instance receiver with an invalid URL, so it needs no external network or credential and distinguishes receiver failure from URL validation.
+- All 45 backend tests, TypeScript typecheck and Agent Worker deployment dry-run passed. The fix requires redeploying only `niao-agent`; no Runner, app rebuild or credential changes are needed. No production deployment was performed.
+
+## Analytics production diagnostics — 2026-10-28
+
+- User reported the deployed receiver fix still returning `analytics_unavailable`; the actual production cause remains unconfirmed.
+- Added bounded/redacted structured catch logging (phase, HTTP status, duration, exception type/message) and distinct HTTP/timeout/fetch/JSON error codes. Never log request headers, stacks or upstream response bodies. Failed HTTP response streams are cancelled.
+- All 46 backend tests, both TypeScript checks and Agent dry-run passed. New coverage verifies redaction and error classification. No deployment performed; production diagnosis requires a new tail capture as documented in usage.md.
+
+## Analytics redirect compatibility — 2026-10-28
+
+- Production diagnostic log identified a second failure: Workers rejects `fetch` with `redirect:"error"` before issuing HTTP. The prior receiver fix alone could not resolve it.
+- Changed Analytics fetch to `redirect:"manual"`. Existing non-2xx handling rejects 3xx and cancels the body, without forwarding credentials or following Location.
+- Added regression cases for 301/302/303/307/308 and updated the request-options assertion. No deployment performed; account retrieval still requires confirmation after the user redeploys.
+
+- After deploying the manual-redirect fix, the user confirmed the production usage API returned `account.status: "available"`, a numeric Neurons total and `errorCode: null`. Final local checks passed all 51 backend tests, typechecking and Agent dry-run.

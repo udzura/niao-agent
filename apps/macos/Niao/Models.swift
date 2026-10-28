@@ -28,6 +28,7 @@ struct HistoryPage: Decodable {
     let active: PartialMessage?
 }
 struct ServerEvent: Decodable {
+    let status: String?
     let epoch: Int?
     let settings: AgentSettings?
     let v: Int?
@@ -84,6 +85,8 @@ func mergeMessages(_ existing: [ChatMessage], _ incoming: [ChatMessage]) -> [Cha
 
 func explanation(_ code: String) -> String {
     switch code {
+    case "tool_limit": "ツールの実行回数上限に達しました。処理を小さく分けてお試しください。"
+    case "invalid_tool_call": "AIが返したツール呼び出しを処理できませんでした。"
     case "unsupported_model": "このモデルは選択できません。サーバーのモデル一覧を確認してください。"
     case "history_changed": "会話履歴が削除・更新されています。再同期してから操作してください。"
     case "precondition_required": "履歴を同期してから削除してください。"

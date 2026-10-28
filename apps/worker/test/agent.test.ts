@@ -248,3 +248,21 @@ describe("persistent chat using the real Agent and SQLite runtime", () => {
     expect(new Set([...first.messages, ...last.messages].map(m => m.seq)).size).toBe(105);
   });
 });
+
+it('accounts separately for each model invocation around a tool call', async () => {
+  await runInDurableObject(await stub(), (agent: NiaoAgent) => {
+    (agent as any).createModel = () => ({async *stream() {
+      yield {usage:{neurons:2}};
+      yield {toolStatus:'running'};
+      yield {toolStatus:'completed'};
+      yield {inferenceStarted:true};
+      yield {usage:{neurons:3}};
+      yield {text:'42'};
+    }});
+  });
+  const client = await connect(); send(client.ws,crypto.randomUUID());
+  await client.until(e => e.type === 'committed');
+  const usage = await (await SELF.fetch(`${base}/usage`,{headers})).json<any>();
+  expect(usage.local.attempts).toBe(2); expect(usage.local.neurons).toBe(5);
+  expect(client.events.filter(e => e.type === 'tool_status').map(e => e.status)).toEqual(['running','completed']);
+});

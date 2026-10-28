@@ -1,0 +1,7 @@
+{
+  ".": "d392ce47205b2b1570cd71ba64c9e7f2720dd3c1",
+  "mrbgems/picoruby-mruby/lib/mruby": "edebf765cf022d1c86d85d58b2433c5568e57de7",
+  "mrbgems/mruby-compiler": "cbe1939ba5c2703225d627c8501543942e64b76f",
+  "mrbgems/mruby-bin-mrbc": "d965620d62fe1a784d071391f1a3dc76dced712e",
+  "mrbgems/mruby-compiler/lib/prism": "c0e37816e97e23e92524a4070e1b99a4025bc63f"
+}

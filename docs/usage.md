@@ -93,3 +93,34 @@ macOS アプリが使う Niao 側の API は **`GET /agents/niao-agent/personal/
 - モデルが `usage.neurons` を返さなかった呼び出し、失敗・中断・実行中の呼び出しは「使用量未取得」として件数を表示します。推定値を勝手に足すことはありません。
 - 同じ完了済みメッセージの再送は加算しません。失敗後に新しい推論を実行した場合は別の呼び出しとして記録します。繰り返し届く累積 usage フレームは二重加算しません。
 - Niao 記録分は推論開始日の UTC 日付に帰属します。日付をまたぐ推論や途中で usage を得られない場合、アカウント集計と一致するとは限りません。
+
+## 本番での取得エラーを調べる
+
+`analytics_unavailable`だけでは原因を区別できなかったため、診断コードと`analytics.error`構造化ログを追加しました。Agentのみ再デプロイ後、先にログ接続を開始してください。
+
+```sh
+# リポジトリルート
+npm run deploy -w @niao/worker
+cd apps/worker
+npx wrangler tail niao-agent --format pretty
+```
+
+別ターミナルから、アプリと同じバックエンドへ取得リクエストを送ります。
+
+```sh
+curl --silent --show-error \
+  -H "Authorization: Bearer $NIAO_TOKEN" \
+  "$NIAO_BACKEND_URL/agents/niao-agent/personal/usage" | jq '.account'
+```
+
+失敗結果は15秒キャッシュされます。ログが出ない場合は15秒以上待って再度取得してください。`phase`はconfiguration/fetch/decode/graphql、`httpStatus`は上流HTTPステータス（取得できた場合）、`errorType`と`message`は例外の種類と伏字済みメッセージです。トークン、Account ID、ヘッダー、スタック、上流レスポンス本文は記録しません。
+
+- `analytics_http_401` / `analytics_http_403`: 上流がHTTPで拒否。
+- `analytics_timeout`: タイムアウト・中断。
+- `analytics_fetch_failed`: fetchまたは実行時例外。ログのmessageを確認。
+- `analytics_invalid_json`: JSONデコード失敗。
+- `analytics_rejected`: GraphQL errorsあり。
+
+修正後のAPIで引き続き`analytics_unavailable`が返る場合は、旧バージョン・別URL・キャッシュの可能性を確認してください。前のfetch receiver修正だけで本番の問題が解消したことは未確認です。診断ログを取得して原因を特定します。
+
+Workersのfetchは`redirect:"error"`を受け付けません。Analyticsは`redirect:"manual"`とし、3xxも非成功レスポンスとして拒否します。`analytics_fetch_failed`のログに`Invalid redirect value`がある場合は、この互換性修正を含むAgentをデプロイしてください。
