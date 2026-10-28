@@ -4,6 +4,9 @@ import Foundation
 
 @MainActor
 final class ChatStore: ObservableObject {
+    @Published var agentSettings: AgentSettings?
+    @Published var controlBusy = false
+    private var historyEpoch: Int?
     @Published var messages: [ChatMessage] = []
     @Published var usage: UsageSnapshot?
     @Published var usageError: String?
@@ -44,7 +47,7 @@ final class ChatStore: ObservableObject {
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(sleep), name: NSWorkspace.willSleepNotification, object: nil)
     }
     var busy: Bool { partial != nil || turns.contains { $0.status == "running" } }
-    var canSend: Bool { connected && !busy && outbox == nil && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && draft.utf16.count <= 8000 }
+    var canSend: Bool { connected && !controlBusy && !busy && outbox == nil && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && draft.utf16.count <= 8000 }
 
     func saveSettings(url: String, token: String) throws {
         let valid = try BackendURL.validate(url).absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
@@ -58,6 +61,7 @@ final class ChatStore: ObservableObject {
         backendURL = valid
         UserDefaults.standard.set(valid, forKey: "backendURL")
         messages = []; cursor = 0; turns = []; partial = nil
+        historyEpoch = nil; agentSettings = nil
         usage = nil; usageError = nil; usageRefreshAt = nil
         reconnect()
     }
@@ -66,6 +70,7 @@ final class ChatStore: ObservableObject {
     @objc private func sleep() { disconnect(); connection = "スリープ中" }
     private func disconnect() {
         generation = UUID()
+        controlBusy = false
         usageTask?.cancel(); usageTask = nil; usageLoading = false
         backend = nil
         loop?.cancel(); loop = nil
@@ -152,12 +157,14 @@ final class ChatStore: ObservableObject {
         var more = true
         while more {
             let revision = eventRevision
-            let page = try await backend.history(after: cursor)
+            let page = try await backend.history(after: cursor, epoch: historyEpoch)
             guard generation == id, !Task.isCancelled else { throw CancellationError() }
+            guard acceptEpoch(page.epoch ?? 0) else { continue }
             messages = mergeMessages(messages, page.messages)
             cursor = page.cursor
             // A response started before a socket event must not roll back its status.
             if eventRevision == revision {
+                agentSettings = page.settings
                 turns = page.turns
                 partial = page.active
             }
@@ -167,8 +174,11 @@ final class ChatStore: ObservableObject {
     }
     private func handle(_ event: ServerEvent) {
         guard event.v == 1 else { return } // Ignore SDK housekeeping if introduced later.
+        guard acceptEpoch(event.epoch ?? 0) else { return }
         eventRevision += 1
         switch event.type {
+        case "history_cleared": break // acceptEpoch already reset the local conversation.
+        case "settings_updated": agentSettings = event.settings
         case "accepted":
             if let message = event.message {
                 messages = mergeMessages(messages, [message])
@@ -195,6 +205,54 @@ final class ChatStore: ObservableObject {
                 if partial?.requestId == requestID { partial = nil }
             }
         default: break
+        }
+    }
+    // Epochs fence old HTTP replies, buffered socket events and persisted offline sends.
+    @discardableResult
+    private func acceptEpoch(_ incoming: Int) -> Bool {
+        if let current = historyEpoch, incoming < current { return false }
+        if let current = historyEpoch, incoming > current {
+            messages = []; turns = []; partial = nil; cursor = 0; draft = ""
+        }
+        historyEpoch = incoming
+        if let pending = outbox, (pending.epoch ?? 0) != incoming { clearOutbox() }
+        return true
+    }
+    func updateModel(_ modelId: String) {
+        guard connected, !controlBusy, let backend else { return }
+        controlBusy = true
+        let id = generation
+        let revision = eventRevision
+        Task {
+            defer { if generation == id { controlBusy = false } }
+            do {
+                let settings = try await backend.updateModel(modelId)
+                guard generation == id else { return }
+                if eventRevision == revision { agentSettings = settings }
+                error = nil
+            } catch {
+                guard generation == id else { return }
+                self.error = error.localizedDescription
+            }
+        }
+    }
+    func clearHistory() {
+        guard connected, !busy, !controlBusy, let backend, let epoch = historyEpoch else { return }
+        controlBusy = true
+        let id = generation
+        Task {
+            defer { if generation == id { controlBusy = false } }
+            do {
+                let result = try await backend.clearHistory(epoch: epoch)
+                guard generation == id else { return }
+                acceptEpoch(result.epoch)
+                error = nil
+            } catch {
+                guard generation == id else { return }
+                self.error = error.localizedDescription
+                // A failed/lost response may have committed. Reconcile before another action.
+                reconnect()
+            }
         }
     }
     private func refreshUsageIfNeeded() {
@@ -224,17 +282,17 @@ final class ChatStore: ObservableObject {
     }
     func send() {
         guard canSend else { return }
-        let pending = Submission(requestId: UUID().uuidString.lowercased(), content: draft.trimmingCharacters(in: .whitespacesAndNewlines))
+        let pending = Submission(requestId: UUID().uuidString.lowercased(), content: draft.trimmingCharacters(in: .whitespacesAndNewlines), epoch: historyEpoch)
         do { try persistOutbox(pending); draft = ""; sendPending(pending) }
         catch { self.error = error.localizedDescription }
     }
     func retry(_ message: ChatMessage) {
-        guard connected, !busy, outbox == nil else { return }
-        let pending = Submission(requestId: message.requestId, content: message.content)
+        guard connected, !controlBusy, !busy, outbox == nil else { return }
+        let pending = Submission(requestId: message.requestId, content: message.content, epoch: historyEpoch)
         do { try persistOutbox(pending); sendPending(pending) }
         catch { self.error = error.localizedDescription }
     }
-    func resendOutbox() { if let pending = outbox, connected, !busy { sendPending(pending) } }
+    func resendOutbox() { if let pending = outbox, connected, !controlBusy, !busy { sendPending(pending) } }
     func discardOutbox() { clearOutbox() }
     private func sendPending(_ pending: Submission) {
         guard let ws = socket else { return }

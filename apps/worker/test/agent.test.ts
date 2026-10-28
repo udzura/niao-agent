@@ -58,6 +58,77 @@ describe("authenticated Worker boundary", () => {
     expect((await SELF.fetch(base, {method: "POST", headers})).status).toBe(405);
   });
 });
+describe("model settings and conversation cleanup", () => {
+  const gemma = "@cf/google/gemma-4-26b-a4b-it";
+  const glm = "@cf/zai-org/glm-4.7-flash";
+  const put = (modelId: string) => SELF.fetch(`${base}/settings`, {method: "PUT", headers: {...headers, "Content-Type": "application/json"}, body: JSON.stringify({modelId})});
+  const clear = (epoch: number) => SELF.fetch(`${base}/history`, {method: "DELETE", headers: {...headers, "If-Match": `"${epoch}"`}});
+  it("authenticates mutations and rejects unsupported or malformed settings", async () => {
+    expect((await SELF.fetch(`${base}/settings`, {method: "PUT", body: "{}"})).status).toBe(401);
+    expect((await SELF.fetch(`${base}/history`, {method: "DELETE"})).status).toBe(401);
+    expect((await put("@cf/not-a-chat-model" )).status).toBe(400);
+    expect((await SELF.fetch(`${base}/settings`, {method: "PUT", headers: {...headers, "Content-Type": "application/json"}, body: "null"})).status).toBe(400);
+    expect((await SELF.fetch(`${base}/history`, {method: "DELETE", headers})).status).toBe(428);
+    const settings = await (await SELF.fetch(`${base}/settings`, {headers})).json<any>();
+    expect(settings.modelId).toBe(gemma); expect(settings.models.map((x: any) => x.id)).toEqual([gemma, glm]);
+  });
+  it("persists the selected model across eviction and uses it for subsequent inference", async () => {
+    const updated = await put(glm);
+    expect(updated.status).toBe(200); await updated.text();
+    await evictDurableObject(await stub());
+    const settings = await (await SELF.fetch(`${base}/settings`, {headers})).json<any>();
+    expect(settings.modelId).toBe(glm);
+    await runInDurableObject(await stub(), (agent: NiaoAgent) => {
+      (agent as any).createModel = (modelId: string) => ({async *stream() { yield {text: modelId}; }});
+    });
+    const client = await connect(); send(client.ws, crypto.randomUUID());
+    expect((await client.until(e => e.type === "committed")).messages[1].content).toBe(glm);
+  });
+  it("changes only the next inference and refuses cleanup while generating", async () => {
+    await runInDurableObject(await stub(), (agent: NiaoAgent) => {
+      (agent as any).createModel = (modelId: string) => ({async *stream() {
+        yield {text: modelId};
+        await new Promise(resolve => setTimeout(resolve, 150));
+      }});
+    });
+    const client = await connect(); const first = crypto.randomUUID(); send(client.ws, first);
+    await client.until(e => e.type === "partial");
+    expect((await clear(0)).status).toBe(409);
+    expect((await put(glm)).status).toBe(200);
+    expect((await client.until(e => e.type === "committed" && e.requestId === first)).messages[1].content).toBe(gemma);
+    const next = crypto.randomUUID(); send(client.ws, next);
+    expect((await client.until(e => e.type === "committed" && e.requestId === next)).messages[1].content).toBe(glm);
+  });
+  it("clears history but preserves settings/usage, fences offline sends and repairs old cursors", async () => {
+    await model(); const client = await connect(); const id = crypto.randomUUID(); send(client.ws, id);
+    await client.until(e => e.type === "committed"); await (await put(glm)).text();
+    const old = await history();
+    const cleared = await clear(0);
+    expect(cleared.status).toBe(200); await cleared.text();
+    expect((await client.until(e => e.type === "history_cleared")).epoch).toBe(1);
+    const page = await history(old.cursor);
+    expect(page.epoch).toBe(1); expect(page.messages).toEqual([]); expect(page.turns).toEqual([]);
+    expect(page.settings.modelId).toBe(glm);
+    expect((await (await SELF.fetch(`${base}/usage`, {headers})).json<any>()).local.neurons).toBe(2.5);
+    send(client.ws, id); // Old offline/retry payload without an epoch cannot resurrect history.
+    expect((await client.until(e => e.type === "error" && e.requestId === id)).code).toBe("history_changed");
+    await runInDurableObject(await stub(), (agent: NiaoAgent) => {
+      (agent as any).createModel = () => ({async *stream(messages: any[]) {
+        if (messages.length !== 2 || messages[1].content !== "new conversation") throw new Error("Old context survived deletion");
+        yield {text: "fresh"};
+      }});
+    });
+    const next = crypto.randomUUID();
+    client.ws.send(JSON.stringify({v: 1, type: "send", requestId: next, content: "new conversation", epoch: 1}));
+    const completed = await client.until(e => e.type === "committed" && e.requestId === next);
+    expect(completed.messages[0].seq).toBeGreaterThan(old.cursor);
+    const staleClear = await clear(0);
+    expect(staleClear.status).toBe(409); await staleClear.text(); // Retrying a lost DELETE response cannot delete the new chat.
+    client.ws.close(); await evictDurableObject(await stub(), {webSockets: "close"});
+    const recovered = await history(old.cursor);
+    expect(recovered.epoch).toBe(1); expect(recovered.messages).toEqual(completed.messages);
+  });
+});
 describe("persistent chat using the real Agent and SQLite runtime", () => {
   it("streams, commits, deduplicates retry, and survives actual eviction", async () => {
     await model();

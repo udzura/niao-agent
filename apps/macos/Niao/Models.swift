@@ -18,6 +18,8 @@ struct PartialMessage: Codable {
     let text: String
 }
 struct HistoryPage: Decodable {
+    let epoch: Int?
+    let settings: AgentSettings?
     let v: Int
     let messages: [ChatMessage]
     let cursor: Int
@@ -26,6 +28,8 @@ struct HistoryPage: Decodable {
     let active: PartialMessage?
 }
 struct ServerEvent: Decodable {
+    let epoch: Int?
+    let settings: AgentSettings?
     let v: Int?
     let type: String
     let requestId: String?
@@ -40,6 +44,7 @@ struct Submission: Codable {
     var type = "send"
     let requestId: String
     let content: String
+    var epoch: Int? = nil
 }
 struct StoredSubmission: Codable {
     let backend: String
@@ -47,11 +52,12 @@ struct StoredSubmission: Codable {
 }
 
 enum NiaoError: LocalizedError {
-    case configuration, unauthorized, http(Int), protocolMismatch, keychain(OSStatus)
+    case configuration, unauthorized, api(String), http(Int), protocolMismatch, keychain(OSStatus)
     var errorDescription: String? {
         switch self {
         case .configuration: "HTTPS のバックエンド URL とトークンを設定してください。HTTP は localhost のみ使用できます。"
         case .unauthorized: "認証に失敗しました。設定のトークンを確認してください。"
+        case .api(let code): explanation(code)
         case .http(let code): "サーバーに接続できません (HTTP \(code))。"
         case .protocolMismatch: "サーバーの通信形式を確認してください。"
         case .keychain(let code): "Keychain にアクセスできません (\(code))。"
@@ -78,6 +84,9 @@ func mergeMessages(_ existing: [ChatMessage], _ incoming: [ChatMessage]) -> [Cha
 
 func explanation(_ code: String) -> String {
     switch code {
+    case "unsupported_model": "このモデルは選択できません。サーバーのモデル一覧を確認してください。"
+    case "history_changed": "会話履歴が削除・更新されています。再同期してから操作してください。"
+    case "precondition_required": "履歴を同期してから削除してください。"
     case "ai_rate_limited": "AI の利用制限に達しました。時間を置いて再試行してください。"
     case "ai_timeout": "AI の応答がタイムアウトしました。再試行できます。"
     case "interrupted", "incomplete_ai_stream": "応答が途中で中断されました。再試行できます。"
@@ -129,3 +138,12 @@ struct UsageSnapshot: Decodable {
         }
     }
 }
+
+struct AgentSettings: Decodable {
+    struct Model: Decodable, Identifiable { let id: String; let name: String }
+    let v: Int
+    let modelId: String
+    let epoch: Int
+    let models: [Model]
+}
+struct ClearHistoryResult: Decodable { let v: Int; let epoch: Int }

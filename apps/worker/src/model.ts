@@ -1,5 +1,13 @@
 import { ChatError } from "./protocol";
-export const MODEL_ID = "@cf/google/gemma-4-26b-a4b-it"; // "@cf/zai-org/glm-4.7-flash";
+export const MODELS = [
+  {id: "@cf/google/gemma-4-26b-a4b-it", name: "Gemma 4 · 26B A4B"},
+  {id: "@cf/zai-org/glm-4.7-flash", name: "GLM 4.7 Flash"},
+] as const;
+export type ModelID = typeof MODELS[number]["id"];
+export const DEFAULT_MODEL: ModelID = MODELS[0].id;
+export function isModelID(value: unknown): value is ModelID {
+  return MODELS.some(model => model.id === value);
+}
 export type ModelMessage = { role: "system" | "user" | "assistant"; content: string };
 export type ModelEvent = { text: string } | { usage: Record<string, number> };
 export interface ChatModel {
@@ -8,9 +16,9 @@ export interface ChatModel {
 
 // The only module aware of Workers AI's provider-specific input and SSE format.
 export class WorkersAIModel implements ChatModel {
-  constructor(private ai: Ai) { }
+  constructor(private ai: Ai, private modelId: ModelID) { }
   async *stream(messages: ModelMessage[], signal: AbortSignal): AsyncIterable<ModelEvent> {
-    const result = await this.ai.run(MODEL_ID, {
+    const result = await this.ai.run(this.modelId, {
       messages, stream: true, max_completion_tokens: 2048,
       chat_template_kwargs: { enable_thinking: false },
       stream_options: { include_usage: true },

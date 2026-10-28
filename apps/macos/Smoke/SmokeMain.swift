@@ -21,7 +21,7 @@ struct SmokeMain {
         let ready = try await Backend.event(from: ws)
         guard ready.type == "ready", ready.v == 1 else { throw NiaoError.protocolMismatch }
         let id = CommandLine.arguments.dropFirst().first ?? UUID().uuidString.lowercased()
-        let submission = Submission(requestId: id, content: "Reply with a short greeting in Japanese.")
+        let submission = Submission(requestId: id, content: "Reply with a short greeting in Japanese.", epoch: before.epoch)
         let data = try JSONEncoder().encode(submission)
         try await ws.send(.string(String(decoding: data, as: UTF8.self)))
         var partials = 0

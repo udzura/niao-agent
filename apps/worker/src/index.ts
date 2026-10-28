@@ -14,10 +14,12 @@ export default {
     if (!env.NIAO_TOKEN || env.NIAO_TOKEN.length < 32) return new Response("Server is not configured", {status: 503});
     if (!await authenticated(request, env.NIAO_TOKEN)) return new Response("Unauthorized", {status: 401, headers: {"WWW-Authenticate": "Bearer"}});
     const url = new URL(request.url);
-    if (request.method !== "GET") return new Response("Method not allowed", {status: 405});
-    if (url.pathname === "/health") return Response.json({ok: true, protocol: 1}, {headers: {"Cache-Control": "no-store"}});
+    if (url.pathname === "/health" && request.method === "GET") return Response.json({ok: true, protocol: 1}, {headers: {"Cache-Control": "no-store"}});
     // One identity only; arbitrary URLs must not create additional billable agents.
-    if (!["/agents/niao-agent/personal", "/agents/niao-agent/personal/history", "/agents/niao-agent/personal/usage"].includes(url.pathname)) return new Response("Not found", {status: 404});
+    if (!["/agents/niao-agent/personal", "/agents/niao-agent/personal/history", "/agents/niao-agent/personal/usage", "/agents/niao-agent/personal/settings"].includes(url.pathname)) return new Response("Not found", {status: 404});
+    const allowed = url.pathname.endsWith("/settings") ? ["GET", "PUT"]
+      : url.pathname.endsWith("/history") ? ["GET", "DELETE"] : ["GET"];
+    if (!allowed.includes(request.method)) return new Response("Method not allowed", {status: 405, headers: {Allow: allowed.join(", ")}});
     const upgrade = request.headers.get("Upgrade")?.toLowerCase() === "websocket";
     if (upgrade && url.pathname !== "/agents/niao-agent/personal") return new Response("Not found", {status: 404});
     return await routeAgentRequest(request, env) ?? new Response("Not found", {status: 404});

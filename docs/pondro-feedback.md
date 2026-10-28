@@ -22,3 +22,6 @@ This implementation contains no Ruby, mruby, PicoRuby, or Pondro runtime. It is 
 9. A production-quality Ruby bridge should expose cancellation/deadlines, persistent transactions, and safe numeric usage alongside streaming. Native host capability injection should remain distinct from agent conversation policy.
 
 Later phases can add discovery, scheduling, memory, or tools without moving these boundaries. None is introduced just to anticipate a future Ruby runtime.
+
+10. Mutable model selection belongs to persistent application configuration. Snapshot it before asynchronous generation so an in-flight response cannot accidentally mix providers after a settings change.
+11. History deletion needs a durable generation/epoch as well as sequence cursors. Fence old offline submissions and in-flight sync responses, and make destructive retries conditional on the epoch. Keep billing observations separate from conversation lifecycle.

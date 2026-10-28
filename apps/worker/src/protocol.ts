@@ -13,7 +13,7 @@ export interface Turn {
   status: "running" | "failed" | "completed";
   errorCode: string | null;
 }
-export type Submission = { v: 1; type: "send"; requestId: string; content: string };
+export type Submission = { v: 1; type: "send"; requestId: string; content: string; epoch?: number };
 export class ChatError extends Error {
   constructor(public code: string) { super(code); }
 }
@@ -24,10 +24,11 @@ export function parseSubmission(raw: unknown): Submission {
   const x = data as Partial<Submission> | null;
   if (!x || x.v !== 1 || x.type !== "send" || typeof x.requestId !== "string" ||
       !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(x.requestId) ||
+      (x.epoch !== undefined && (!Number.isSafeInteger(x.epoch) || x.epoch < 0)) ||
       typeof x.content !== "string" || !x.content.trim() || x.content.length > MAX_INPUT) {
     throw new ChatError("invalid_message");
   }
-  return {v: 1, type: "send", requestId: x.requestId.toLowerCase(), content: x.content.trim()};
+  return {v: 1, type: "send", requestId: x.requestId.toLowerCase(), content: x.content.trim(), epoch: x.epoch};
 }
 export function errorCode(error: unknown): string {
   if (error instanceof ChatError) return error.code;

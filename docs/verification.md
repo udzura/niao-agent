@@ -37,7 +37,7 @@ Swift tests cover HTTPS/loopback credential destination policy, history/WebSocke
 - Native app distribution signing and notarization are not included. Local builds use ad-hoc signing, which may trigger Keychain permission prompts after rebuilds.
 - Streaming text does not survive isolate termination; the saved user row becomes retryable. Active snapshots recover ordinary socket reconnects. There is no automatic paid model replay after a crash.
 - A provider may report quota exhaustion without a numeric status; such an error becomes safe `ai_unavailable` rather than exposing a raw provider body.
-- Conversation retrieval is paginated, but the macOS view eventually loads all persisted history. There is no retention/delete UI or semantic memory in Phase 1.
+- Conversation retrieval is paginated, but the macOS view eventually loads all persisted history. There is a whole-history delete UI; automatic retention and semantic memory remain out of scope.
 
 ## Manual checklist
 
@@ -60,3 +60,12 @@ Wrangler and Xcode initially encountered this execution environment's filesystem
 - Cloudflare's live introspection confirmed `AccountAiInferenceAdaptiveGroupsSum.totalNeurons`; an authenticated aggregate query returned an account-wide daily value during investigation. This used existing local Wrangler authentication for read-only investigation, not a deployed Analytics secret.
 - Dedicated server-side Analytics credentials still need user configuration as described in [usage.md](usage.md). No credentials were copied into source or embedded in the native app.
 - User reported the added functionality working. Automated GUI interaction remains unverified.
+
+## Model selection and cleanup follow-up — 2026-10-28
+
+- Backend: all 24 tests pass across 3 files. New coverage verifies authenticated mutations, unsupported models, persistent model selection after real Durable Object eviction, per-inference model snapshots, rejection of cleanup during generation, preservation of usage/settings, stale submission fencing, conditional DELETE retries, cursor recovery, and clean context after deletion. Inference in these tests uses explicit fixtures, not live paid Workers AI.
+- Swift: all 7 tests pass, including epoch persistence/backward-compatible outbox decoding and settings event decoding.
+- TypeScript typecheck, Worker deployment dry-run, macOS Xcode build, and git whitespace checks pass.
+- Tests initially exposed undrained test HTTP response bodies blocking Durable Object eviction; consuming those responses fixed the test harness. Swift's generic function scope restriction was also resolved before successful builds.
+- New settings/cleanup GUI interaction and model switching against live Workers AI were not automated. No production deployment or deletion of existing user conversation data was performed.
+- Manual follow-up: update both Worker and app, change model in Settings and send a message, relaunch to verify selection, then use a disposable conversation to check the trash confirmation and empty history after reconnect. A second connected client should reflect both operations. Usage should remain unchanged by cleanup.

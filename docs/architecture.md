@@ -31,7 +31,7 @@ sequenceDiagram
 
 The Worker authenticates every application endpoint before Agent routing. Only the `NiaoAgent` class and `personal` instance are reachable. There is no public arbitrary-instance factory. Health means the Worker is configured and reachable; it does not consume an inference or attest AI availability.
 
-The SDK supplies Durable Object routing/identity, lifecycle, hibernatable WebSocket connections, connection iteration, and parameterized SQLite access. Cloudflare supplies storage durability and the AI binding. Application code owns append-only messages, monotonic cursors, idempotent turn IDs, concurrency, context budgets, error classification, and client reconciliation. No SDK state synchronization, tools, schedules, or RPC methods are exposed by this app. Connections are marked read-only for SDK state writes, and SDK protocol broadcasts are disabled; application WebSocket messages remain enabled.
+The SDK supplies Durable Object routing/identity, lifecycle, hibernatable WebSocket connections, connection iteration, and parameterized SQLite access. Cloudflare supplies storage durability and the AI binding. Application code owns messages (append-only between explicit cleanups), monotonic cursors, idempotent turn IDs, concurrency, context budgets, error classification, and client reconciliation. No SDK state synchronization, tools, schedules, or RPC methods are exposed by this app. Connections are marked read-only for SDK state writes, and SDK protocol broadcasts are disabled; application WebSocket messages remain enabled.
 
 ## Protocol decision, inspected 2026-10-27
 
@@ -80,3 +80,9 @@ Token rotation requires updating Keychain too. Existing authenticated sockets ar
 `UsageAnalytics` reads `aiInferenceAdaptiveGroups.sum.totalNeurons` through Cloudflare's official GraphQL API using server-only `CF_ACCOUNT_ID` / `CF_ANALYTICS_TOKEN`. Scope is the entire account and UTC day, not a single model. Failures are distinct from zero; remote results have a 60-second success cache and 15-second failure cache. The native UI fetches independently of chat so Analytics failure does not disconnect conversation.
 
 The existing SQLite Agent also records inference attempts and provider-reported neurons. Replayed completed submissions create no attempt; retries that actually invoke the provider do. Unknown usage remains null and is counted separately. This observation ledger is a clearly labelled fallback, not a reconstruction of full account billing. No model rates or tokens-to-neurons guesses are used. Configuration and limitations are in [usage.md](usage.md).
+
+## Model settings and history cleanup (2026-10-28)
+
+`niao_settings` persists the selected model and a conversation epoch. The application advertises a small explicit model catalog (Gemma 4 and GLM 4.7 Flash); the adapter accepts the selected ID and retains the existing stream-of-text/usage interface. Selection is snapshotted at inference start. No inference, tools, or model fallback are introduced by updating settings.
+
+Cleanup is an application transaction, not deletion of the Durable Object: it deletes messages and turn identities, increments the epoch, and preserves settings and usage. It is refused during inference. The epoch serves both as a DELETE precondition and a fence for offline submissions and stale HTTP/socket delivery; a monotonic message cursor alone cannot invalidate a client's cached deleted rows. The Swift client resets local history and drops an older outbox when the epoch advances. The SQL sequence is deliberately not reset.

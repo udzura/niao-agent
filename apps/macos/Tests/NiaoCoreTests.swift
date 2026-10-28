@@ -40,4 +40,18 @@ final class NiaoCoreTests: XCTestCase {
         XCTAssertEqual(account.displayedNeurons, 23.35)
     }
 
+    func testSubmissionPersistsConversationEpoch() throws {
+        let submission = Submission(requestId: "r", content: "hello", epoch: 7)
+        let data = try JSONEncoder().encode(submission)
+        XCTAssertEqual(try JSONDecoder().decode(Submission.self, from: data).epoch, 7)
+        let legacy = try JSONDecoder().decode(Submission.self, from: Data(#"{"v":1,"type":"send","requestId":"r","content":"hello"}"#.utf8))
+        XCTAssertNil(legacy.epoch)
+    }
+    func testControlEventDecoding() throws {
+        let data = Data(#"{"v":1,"type":"settings_updated","epoch":2,"settings":{"v":1,"epoch":2,"modelId":"model","models":[{"id":"model","name":"Example"}]}}"#.utf8)
+        let event = try JSONDecoder().decode(ServerEvent.self, from: data)
+        XCTAssertEqual(event.epoch, 2)
+        XCTAssertEqual(event.settings?.modelId, "model")
+    }
+
 }

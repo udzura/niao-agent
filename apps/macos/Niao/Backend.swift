@@ -33,14 +33,37 @@ final class Backend {
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         return request
     }
-    func history(after: Int) async throws -> HistoryPage {
-        let (data, response) = try await session.data(for: request(path: "/agents/niao-agent/personal/history?after=\(after)"))
+    func history(after: Int, epoch: Int? = nil) async throws -> HistoryPage {
+        let (data, response) = try await session.data(for: request(path: "/agents/niao-agent/personal/history?after=\(after)&epoch=\(epoch ?? 0)"))
         guard let http = response as? HTTPURLResponse else { throw NiaoError.protocolMismatch }
         if http.statusCode == 401 { throw NiaoError.unauthorized }
         guard http.statusCode == 200 else { throw NiaoError.http(http.statusCode) }
         let page = try JSONDecoder().decode(HistoryPage.self, from: data)
         guard page.v == 1 else { throw NiaoError.protocolMismatch }
         return page
+    }
+    private struct Failure: Decodable { let code: String }
+    private func controlRequest<T: Decodable>(path: String, method: String, body: Data? = nil, epoch: Int? = nil) async throws -> T {
+        var req = request(path: path)
+        req.httpMethod = method
+        req.httpBody = body
+        if body != nil { req.setValue("application/json", forHTTPHeaderField: "Content-Type") }
+        if let epoch { req.setValue("\"\(epoch)\"", forHTTPHeaderField: "If-Match") }
+        let (data, response) = try await session.data(for: req)
+        guard let http = response as? HTTPURLResponse else { throw NiaoError.protocolMismatch }
+        if http.statusCode == 401 { throw NiaoError.unauthorized }
+        guard http.statusCode == 200 else {
+            if let failure = try? JSONDecoder().decode(Failure.self, from: data) { throw NiaoError.api(failure.code) }
+            throw NiaoError.http(http.statusCode)
+        }
+        return try JSONDecoder().decode(T.self, from: data)
+    }
+    func updateModel(_ modelId: String) async throws -> AgentSettings {
+        let body = try JSONEncoder().encode(["modelId": modelId])
+        return try await controlRequest(path: "/agents/niao-agent/personal/settings", method: "PUT", body: body)
+    }
+    func clearHistory(epoch: Int) async throws -> ClearHistoryResult {
+        try await controlRequest(path: "/agents/niao-agent/personal/history", method: "DELETE", epoch: epoch)
     }
     func usage() async throws -> UsageSnapshot {
         let (data, response) = try await session.data(for: request(path: "/agents/niao-agent/personal/usage"))
