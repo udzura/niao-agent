@@ -50,3 +50,13 @@ Swift tests cover HTTPS/loopback credential destination policy, history/WebSocke
 7. Try an invalid token; check that the error remains visible and automatic retry stops.
 
 Wrangler and Xcode initially encountered this execution environment's filesystem/macro sandbox restrictions. Their final checks were run with approved normal host permissions. One harmless Xcode warning states AppIntents metadata extraction was skipped because no AppIntents dependency exists; SDK dependency source-map warnings also do not affect the test results.
+
+## Icon and daily usage follow-up — 2026-10-28
+
+- Backend: 19 tests across 3 files pass, including Analytics error/zero distinction, caching, UTC rollover, authentication, duplicate accounting and eviction persistence.
+- Swift: 5 tests pass, including millisecond ISO 8601 timestamps and account/local usage labels. The initial date parsing failure was fixed before the final successful run.
+- macOS app with AppIcon asset catalog and usage UI: build succeeded.
+- Worker dry-run and TypeScript: succeeded; no production deployment performed by this implementation session.
+- Cloudflare's live introspection confirmed `AccountAiInferenceAdaptiveGroupsSum.totalNeurons`; an authenticated aggregate query returned an account-wide daily value during investigation. This used existing local Wrangler authentication for read-only investigation, not a deployed Analytics secret.
+- Dedicated server-side Analytics credentials still need user configuration as described in [usage.md](usage.md). No credentials were copied into source or embedded in the native app.
+- User reported the added functionality working. Automated GUI interaction remains unverified.

@@ -116,6 +116,23 @@ curl -H "Authorization: Bearer $NIAO_TOKEN" "$NIAO_BACKEND_URL/health"
 
 このビルドは個人の開発用 ad-hoc 署名です。配布する場合は Developer ID 署名と notarization を別途行ってください。
 
+## 日次ニューロン使用量を表示する
+
+Cloudflare の **Account → Account Analytics → Read** 権限を持つ専用 API トークンを作成し、Worker に `CF_ACCOUNT_ID` と `CF_ANALYTICS_TOKEN` を設定すると、アカウント全体の使用量を取得します。アプリ側の `NIAO_TOKEN` はそのまま使用します。
+
+```sh
+cd apps/worker
+npx wrangler secret put CF_ACCOUNT_ID
+npx wrangler secret put CF_ANALYTICS_TOKEN
+npm run deploy
+```
+
+日次は UTC 基準（日本時間 9:00 リセット）です。未設定・取得失敗時には「Niao 記録分」を区別して表示します。具体的なトークン作成、ローカル設定、GraphQL クエリ、エラーの確認方法は [使用量の設定手順](docs/usage.md) を参照してください。
+
+## アプリアイコン
+
+オリジナルの鳥の SVG を `apps/macos/Artwork/Niao.svg` に保存しています。PNG の各解像度もリポジトリに含まれるため、通常のビルドに画像ツールは不要です。SVG を変更した場合は ImageMagick を入れて `python3 apps/macos/scripts/generate-icon.py` で再生成できます。既存のメニューバーの SF Symbols は UI 内で使用し、Dock のアプリアイコンには独自の図形を使用しています。[Apple の SF Symbols 利用案内](https://developer.apple.com/design/human-interface-guidelines/sf-symbols)
+
 ## テスト・検証
 
 ```sh

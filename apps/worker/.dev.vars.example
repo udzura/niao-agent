@@ -1,2 +1,7 @@
 # Generate a random value: openssl rand -hex 32
 NIAO_TOKEN=
+
+# Optional: account-wide Workers AI usage (see docs/usage.md).
+# Permission: Account > Account Analytics > Read
+CF_ACCOUNT_ID=
+CF_ANALYTICS_TOKEN=
