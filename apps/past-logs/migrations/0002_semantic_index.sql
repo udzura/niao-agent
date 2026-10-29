@@ -40,7 +40,6 @@ CREATE TRIGGER documents_update AFTER UPDATE OF search_title, search_body ON doc
   INSERT INTO documents_fts(rowid, search_title, search_body)
     VALUES (new.rowid, new.search_title, new.search_body);
 END;
-UPDATE documents SET semantic_revision = lower(hex(randomblob(16)));
 
 CREATE TRIGGER semantic_insert AFTER INSERT ON documents BEGIN
   UPDATE documents SET semantic_revision = lower(hex(randomblob(16))) WHERE rowid = new.rowid;
@@ -65,7 +64,3 @@ CREATE TRIGGER semantic_delete AFTER DELETE ON documents BEGIN
       status='pending', next_chunk=0, chunk_count=0, cleanup_after='', last_error=NULL, mutation_id=NULL,
       updated_at=excluded.updated_at;
 END;
-
--- Existing archives become pending without needing a source re-import.
-INSERT INTO semantic_jobs(document_id, revision, operation)
-  SELECT id, semantic_revision, 'upsert' FROM documents;

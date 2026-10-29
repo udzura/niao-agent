@@ -194,7 +194,7 @@ npm run build:worker
 
 テストはローカルD1/workerdを使います。Agent統合テストも実MCPクライアント→実Past Logs Worker→D1を通り、既存Ruby Runner RPCまで検証します。推論部分だけを明示的な決定的テストモデルにしています。test:devは独立起動したWorkerの実TCP/HTTPを使用します。
 
-2026-10-29の検証: Past Logs 25件、Niao 96件（既存93件＋MCP統合3件）、型チェック、Worker dry-run buildが成功。サンプル3件のHTTP取り込みとMCP検索・取得も確認しました。Niaoの推論を含む本番疎通は未実施です。
+2026-10-29の検証: Past Logs 24件、Niao 96件（既存93件＋MCP統合3件）、型チェック、Worker dry-run buildが成功。サンプル3件のHTTP取り込みとMCP検索・取得も確認しました。Niaoの推論を含む本番疎通は未実施です。
 
 別プロセスのPast Logsを同じローカルD1で再起動後、再取り込みなしでMCP検索・取得が成功しました。Agent内蔵MCPクライアントから実際のloopback URLへ接続する追加プローブも成功しています。意味検索追加後のgzipバンドルはPast Logs約220 KiB、NiaoAgent約433 KiBです。macOSとRuby Runnerのソースは変更していません。
 

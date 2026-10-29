@@ -30,7 +30,7 @@ MCP semantic query → query Embedding → Vectorize → 現在のD1 revisionと
 
 D1とVectorizeを跨ぐトランザクションはありません。D1を原本とし、次の方式で回復可能にしています。
 
-- マイグレーション0002が、既存記事を含めて`semantic_jobs`に処理対象を記録します。新規・更新・削除時にもSQLトリガーで同じD1トランザクションにジョブを書き込みます。
+- 新規取り込みから利用する前提です。マイグレーション0002はスキーマだけを追加し、既存記事の走査・バックフィルは行いません。登録・更新・削除時にSQLトリガーで同じD1トランザクションに`semantic_jobs`を書き込みます。
 - 本文・タイトルが変わったときだけrevisionを更新します。同一内容の再取り込みやURL・日時・metadataだけの変更は再Embeddingしません。
 - RESTのPOST/PUT/DELETEはD1更新後、意味索引への登録・削除をその場で試みます。HTTP 200はD1保存の成功です。追加の`semantic_index`フィールドで`pending`か`submitted`、進捗、最後の安全なエラーコードを確認してください。
 - **submittedはVectorizeへの受付完了**です。[Vectorizeの更新・削除は非同期](https://developers.cloudflare.com/vectorize/reference/client-api/)なので、検索可能になるまで遅延があります。read-after-write整合性を意味しません。
@@ -66,7 +66,9 @@ npm run dev:offline
 
 こちらは`wrangler.offline.jsonc`の実ローカルD1を使います。意味検索は`semantic_not_configured`を返し、索引ジョブはD1にpendingとして残ります。あとで実bindingを設定して再索引できます。テスト用fixtureをこの開発サーバーへ組み込むことはありません。
 
-## 既存記事の索引化と失敗の再試行
+## 索引処理の再試行
+
+通常は取り込み時に自動で索引へ登録するため、初回の一括索引化は不要です。失敗や長い記事の処理上限でpendingが残った場合だけ、次のコマンドで続きを処理します。
 
 zshの非表示入力で管理トークンを設定後:
 
@@ -119,7 +121,7 @@ queryは必須・最大2000 UTF-16コード単位、limitは既定5・最大20�
 
 ## デプロイ
 
-初回は既存のD1作成・トークン設定に加え、本番インデックスを作成します。既存D1のdatabase_idをmainのwrangler.jsoncに設定し、開発用設定にはコピーしないでください。
+初回はD1作成・トークン設定に加え、本番インデックスを作成します。D1のdatabase_idをmainのwrangler.jsoncに設定し、開発用設定にはコピーしないでください。記事がない作成済みDBでもスキーマのマイグレーションは必要です。
 
 ```sh
 cd apps/past-logs
@@ -135,7 +137,7 @@ npm run deploy
 npm run deploy -w @niao/worker
 ```
 
-上の最後のコマンドはリポジトリルートから実行します。macOSアプリとRuby Runnerの再ビルド・再デプロイは不要です。PAST_LOGS_URLを本番HTTPS URLにして`npm run reindex -w apps/past-logs`を実行すると、既存D1記事を索引化できます。
+上の最後のコマンドはリポジトリルートから実行します。macOSアプリとRuby Runnerの再ビルド・再デプロイは不要です。デプロイ後はRESTから記事を登録するだけで、キーワード・意味検索の両方の対象になります。
 
 ## 検証と費用の範囲
 
@@ -146,9 +148,9 @@ npm run build:past-logs
 npm run build:worker
 ```
 
-ローカルD1/workerd上で移行・二重登録・再試行・中断/リース回復・部分進捗・同時更新・削除・再取り込み・source/score・MCP認証/入力検証を確認します。AI/Vectorizeは明示的なテストfixtureで、これは実モデルの検索品質や実Vectorizeの反映遅延の保証ではありません。
+ローカルD1/workerd上で新規登録・再試行・中断/リース回復・部分進捗・同時更新・削除・再取り込み・source/score・MCP認証/入力検証を確認します。AI/Vectorizeは明示的なテストfixtureで、これは実モデルの検索品質や実Vectorizeの反映遅延の保証ではありません。
 
-実bindingを設定してサンプルを取り込み、reindex完了・Vectorizeへの反映後に:
+実bindingを設定してサンプルを取り込み、インポート応答の`semantic_index.status`がsubmittedになり、Vectorizeへ反映されたら:
 
 ```sh
 read -rs 'PAST_LOGS_READ_TOKEN?Past Logs read token: '; echo
