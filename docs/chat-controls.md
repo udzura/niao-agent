@@ -11,18 +11,20 @@ curl --fail-with-body -H "Authorization: Bearer $NIAO_TOKEN" \
 curl --fail-with-body -X PUT \
   -H "Authorization: Bearer $NIAO_TOKEN" \
   -H 'Content-Type: application/json' \
-  --data '{"modelId":"@cf/google/gemma-4-26b-a4b-it","thinkingEnabled":true}' \
+  --data '{"modelId":"@cf/google/gemma-4-26b-a4b-it","thinkingMode":"auto"}' \
   "$NIAO_BACKEND_URL/agents/niao-agent/personal/settings"
 ```
 
-レスポンスには `modelId`（現在の選択）、`thinkingEnabled`（ON/OFF）、`models`（選択可能なID・表示名・`supportsThinking`）、`epoch`（会話の世代）、`v: 1` が含まれます。現在の候補は以下の2つです。
+レスポンスには `modelId`（現在の選択）、`thinkingMode`（`auto/on/off`）、`thinkingPolicy`（閾値・曖昧時方針・タイムアウト）、旧形式互換の `thinkingEnabled`、`models`（選択可能なID・表示名・`supportsThinking`）、`epoch`（会話の世代）、`v: 1` が含まれます。現在の回答モデル候補は以下の2つです。
 
 - `@cf/google/gemma-4-26b-a4b-it`（既定）
 - `@cf/zai-org/glm-4.7-flash`
 
 モデルとthinking設定はSQLiteに永続化され、次の会話ターンから適用されます。生成中の応答は、ツール実行後の続きも含めて開始時の設定を使い続けます。失敗した応答を再試行する際は新しい設定を使用します。完了済み送信の再送には保存済みの応答を返します。
 
-`thinkingEnabled` はJSONの真偽値で指定します。`false` でOFFにでき、省略すると現在の保存値を維持します（モデルだけ変更する既存クライアントとの互換性）。初回・既存DBの移行時の既定は `false` です。現在はGemma 4にのみ適用します。GLM 4.7 Flashでは保存値にかかわらず従来通りthinkingを無効にし、Gemmaへ戻した際は保存値を再利用します。モデルごとの複数設定ではなく、選択中のモデルと一緒に保持する1つのオプションです。
+`thinkingMode` は `auto`（自動）/ `on`（常にON）/ `off`（常にOFF）です。省略すると現在値を維持します。旧 `thinkingEnabled:true/false` は `on/off` として受理しますが、`thinkingMode` と同時には指定できません。既存DBのON/OFFは保持し、新規の既定はOFFです。現在はGemma 4にのみ適用し、GLMではthinkingとjudgeを無効にします。モデルを切り替えても保存値を保持します。モデルごとの複数設定ではなく、選択中のモデルと一緒に保持する1つのオプションです。
+
+自動ではClef-flashをターン開始時に1回だけ呼びます。`thinkingPolicy` の部分更新で閾値・曖昧時の方針・タイムアウトを変更でき、judgeの使用量と待ち時間も記録します。詳細とcurl例は[自動thinking](automatic-thinking.md)を参照してください。
 
 thinkingのON/OFFは生成要求の設定で、OFFでもモデルがthinkingを返す場合は分離して表示します。ONでは生成時間や消費量が増える場合があります。[Googleのthinking説明](https://ai.google.dev/gemma/docs/capabilities/thinking)も参照してください。出力上限は従来の2,048トークンで、thinkingを有効にしても自動では増やしません。思考だけで終わって回答が得られない場合はエラーになります。
 

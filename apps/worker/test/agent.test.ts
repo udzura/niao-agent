@@ -3,6 +3,7 @@ import { getAgentByName } from "agents";
 import { afterEach, describe, expect, it } from "vitest";
 import { NiaoAgent } from "../src/niao-agent";
 import { ChatError } from "../src/protocol";
+import { ClefThinkingJudge } from "../src/thinking-policy";
 
 const headers = {Authorization: "Bearer test-only-token-000000000000000000000000"};
 const base = "https://test/agents/niao-agent/personal";
@@ -40,6 +41,10 @@ async function connect() {
   return {ws, events, until};
 }
 const send = (ws: WebSocket, requestId: string, content = "hello") => ws.send(JSON.stringify({v: 1, type: "send", requestId, content}));
+async function settingsUpdate(body: unknown) {
+  const response=await SELF.fetch(`${base}/settings`,{method:"PUT",headers:{...headers,"Content-Type":"application/json"},body:JSON.stringify(body)});
+  return {status:response.status,body:await response.json<any>()};
+}
 async function history(after = 0) {
   const response = await SELF.fetch(`${base}/history?after=${after}`, {headers});
   expect(response.status).toBe(200);
@@ -56,6 +61,135 @@ describe("authenticated Worker boundary", () => {
     expect((await SELF.fetch("https://test/health?token=anything")).status).toBe(401);
     expect((await SELF.fetch("https://test/agents/niao-agent/other", {headers})).status).toBe(404);
     expect((await SELF.fetch(base, {method: "POST", headers})).status).toBe(405);
+  });
+});
+
+describe("automatic thinking and judge accounting",()=>{
+  const gemma="@cf/google/gemma-4-26b-a4b-it";
+  const usage=async()=> (await SELF.fetch(`${base}/usage`,{headers})).json<any>();
+  it("judges once per turn, keeps tool continuations fixed, and counts rate-derived neurons exactly once",async()=>{
+    expect((await settingsUpdate({modelId:gemma,thinkingMode:"auto"})).status).toBe(200);
+    await runInDurableObject(await stub(),(agent:NiaoAgent)=>{
+      let calls=0;
+      (agent as any).createThinkingJudge=()=>new ClefThinkingJudge({run:async(model:string,input:any)=>{
+        calls++;expect(model).toBe('@cf/cloudflare/clef-flash');expect(input.state.messages.at(-1).content).toBe('hello');
+        await new Promise(resolve=>setTimeout(resolve,50));
+        return {answers:{needs_thinking:{type:'noul',noul:0.1}},usage:{input_tokens:1000}};
+      }} as unknown as Ai);
+      (agent as any).createModel=(_model:string,enabled:boolean)=>({async *stream(){
+        expect(calls).toBe(1);expect(enabled).toBe(false);
+        yield {usage:{neurons:2}};yield {toolStatus:'running'};yield {toolStatus:'completed'};
+        yield {inferenceStarted:true};yield {usage:{neurons:3}};yield {text:'direct answer'};
+        expect(calls).toBe(1);
+      }});
+    });
+    const client=await connect();const id=crypto.randomUUID();send(client.ws,id);
+    await client.until(e=>e.type==='accepted');send(client.ws,id);
+    await client.until(e=>e.type==='committed');send(client.ws,id);
+    const first=await usage();
+    expect(first.local).toMatchObject({neurons:8.455,attempts:3,unmeasuredAttempts:0,
+      judge:{neurons:3.455,attempts:1,unmeasuredAttempts:0,calculatedAttempts:1,timedAttempts:1}});
+    expect(first.local.judge.totalDurationMs).toBeGreaterThanOrEqual(40);
+    await runInDurableObject(await stub(),(agent:NiaoAgent)=>{
+      expect(agent.sql`SELECT score, reason, inputTokens, neuronsPerMillion FROM niao_judge_attempts`).toEqual([
+        {score:0.1,reason:'low_score',inputTokens:1000,neuronsPerMillion:3455},
+      ]);
+    });
+    client.ws.close();await evictDurableObject(await stub(),{webSockets:'close'});
+    expect((await usage()).local).toEqual(first.local);
+    const cleared=await SELF.fetch(`${base}/history`,{method:'DELETE',headers:{...headers,'If-Match':'"0"'}});
+    expect(cleared.status).toBe(200);await cleared.text();
+    expect((await usage()).local).toEqual(first.local);
+  });
+  it.each([
+    [0.9,false,true,'high_score'],[0.5,false,true,'ambiguous'],[null,false,true,'invalid_response'],[null,true,true,'unavailable'],
+  ])("keeps generation working for score %s / failure %s",async(score,fail,enabled,reason)=>{
+    await settingsUpdate({modelId:gemma,thinkingMode:'auto'});
+    await runInDurableObject(await stub(),(agent:NiaoAgent)=>{
+      (agent as any).createThinkingJudge=()=>new ClefThinkingJudge({run:async()=>{
+        if(fail)throw new Error('private upstream response');
+        return {answers:{needs_thinking:{type:'noul',noul:score}},usage:{input_tokens:1000}};
+      }} as unknown as Ai);
+      (agent as any).createModel=(_model:string,actual:boolean)=>({async *stream(){
+        expect(actual).toBe(enabled);yield {usage:{neurons:2}};yield {text:'answer'};
+      }});
+    });
+    const client=await connect();send(client.ws,crypto.randomUUID());await client.until(e=>e.type==='committed');
+    const result=await usage();
+    expect(result.local.attempts).toBe(2);expect(result.local.judge.attempts).toBe(1);
+    expect(result.local.neurons).toBe(fail?2:5.455);expect(result.local.unmeasuredAttempts).toBe(fail?1:0);
+    await runInDurableObject(await stub(),(agent:NiaoAgent)=>{expect(agent.sql`SELECT reason FROM niao_judge_attempts`).toEqual([{reason}]);});
+  });
+  it("does not invoke the judge for manual modes or an unsupported model",async()=>{
+    await runInDurableObject(await stub(),(agent:NiaoAgent)=>{
+      (agent as any).createThinkingJudge=()=>{throw new Error('Unexpected judge');};
+      (agent as any).createModel=(_model:string,enabled:boolean)=>({async *stream(){yield {usage:{neurons:1}};yield {text:enabled?'on':'off'};}});
+    });
+    const client=await connect();
+    for (const [modelId,thinkingMode,answer] of [[gemma,'off','off'],[gemma,'on','on'],['@cf/zai-org/glm-4.7-flash','auto','off']]) {
+      await settingsUpdate({modelId,thinkingMode});const id=crypto.randomUUID();send(client.ws,id);
+      expect((await client.until(e=>e.type==='committed'&&e.requestId===id)).messages[1].content).toBe(answer);
+    }
+    const result=await usage();expect(result.local.attempts).toBe(3);expect(result.local.judge.attempts).toBe(0);
+  });
+  it("continues with thinking ON after a judge timeout and marks its unknown usage",async()=>{
+    await settingsUpdate({modelId:gemma,thinkingMode:'auto',thinkingPolicy:{timeoutMs:100}});
+    await runInDurableObject(await stub(),(agent:NiaoAgent)=>{
+      (agent as any).createThinkingJudge=()=>new ClefThinkingJudge({run:()=>new Promise(()=>{})} as unknown as Ai);
+      (agent as any).createModel=(_model:string,enabled:boolean)=>({async *stream(){
+        expect(enabled).toBe(true);yield {text:'answer after timeout'};yield {usage:{neurons:2}};
+      }});
+    });
+    const client=await connect();send(client.ws,crypto.randomUUID());
+    await client.until(e=>e.type==='committed');
+    const result=await usage();
+    expect(result.local).toMatchObject({neurons:2,attempts:2,unmeasuredAttempts:1,judge:{attempts:1,unmeasuredAttempts:1,timedAttempts:1}});
+    expect(result.local.judge.totalDurationMs).toBeGreaterThanOrEqual(90);
+  });
+  it("migrates a saved boolean ON and preserves adjustable policy across restart and legacy model changes",async()=>{
+    await runInDurableObject(await stub(),(agent:NiaoAgent)=>{
+      agent.sql`DROP TABLE niao_settings`;
+      agent.sql`CREATE TABLE niao_settings (id INTEGER PRIMARY KEY,modelId TEXT NOT NULL,epoch INTEGER NOT NULL,thinkingEnabled INTEGER NOT NULL)`;
+      agent.sql`INSERT INTO niao_settings VALUES (1,'@cf/google/gemma-4-26b-a4b-it',2,1)`;
+    });
+    await evictDurableObject(await stub());
+    expect((await history()).settings).toMatchObject({thinkingMode:'on',thinkingEnabled:true,epoch:2});
+    const policy={offThreshold:0.2,onThreshold:0.8,ambiguity:'on',timeoutMs:1500};
+    expect((await settingsUpdate({modelId:gemma,thinkingMode:'auto',thinkingPolicy:policy})).body).toMatchObject({thinkingMode:'auto',thinkingPolicy:policy});
+    await evictDurableObject(await stub());
+    expect((await history()).settings).toMatchObject({thinkingMode:'auto',thinkingPolicy:policy});
+    expect((await settingsUpdate({modelId:gemma})).body.thinkingMode).toBe('auto');
+    expect((await settingsUpdate({modelId:gemma,thinkingPolicy:{ambiguity:'off'}})).body.thinkingPolicy).toEqual({...policy,ambiguity:'off'});
+    expect((await settingsUpdate({modelId:gemma,thinkingEnabled:false})).body.thinkingMode).toBe('off');
+    const before=(await history()).settings;
+    for (const fields of [{thinkingMode:'invalid'},{thinkingMode:null},{thinkingMode:'auto',thinkingEnabled:false},{thinkingPolicy:{offThreshold:0.9}},{thinkingPolicy:{timeoutMs:1}},{thinkingPolicy:{oops:1}}]) {
+      expect((await settingsUpdate({modelId:gemma,...fields})).status).toBe(400);
+    }
+    expect((await history()).settings).toEqual(before);
+  });
+  it("uses the turn's policy snapshot and charges each retry but never a completed replay",async()=>{
+    await settingsUpdate({modelId:gemma,thinkingMode:'auto'});
+    await runInDurableObject(await stub(),(agent:NiaoAgent)=>{
+      let generations=0;
+      (agent as any).createThinkingJudge=()=>new ClefThinkingJudge({run:async()=>{
+        await new Promise(resolve=>setTimeout(resolve,150));
+        return {answers:{needs_thinking:{type:'noul',noul:0.5}},usage:{input_tokens:1000}};
+      }} as unknown as Ai);
+      (agent as any).createModel=(_model:string,enabled:boolean)=>({async *stream(){
+        generations++;if(generations===1){expect(enabled).toBe(true);throw new ChatError('ai_rate_limited');}
+        yield {text:enabled?'on':'off'};yield {usage:{neurons:2}};
+      }});
+    });
+    const client=await connect();const id=crypto.randomUUID();send(client.ws,id);
+    await client.until(e=>e.type==='accepted');
+    await settingsUpdate({modelId:gemma,thinkingPolicy:{ambiguity:'off'}});
+    await client.until(e=>e.type==='error'&&e.requestId===id);
+    await runInDurableObject(await stub(),(agent:NiaoAgent)=>{expect(agent.sql`SELECT reason FROM niao_judge_attempts`).toEqual([{reason:'ambiguous'}]);});
+    send(client.ws,id);
+    expect((await client.until(e=>e.type==='committed'&&e.requestId===id)).messages[1].content).toBe('off');
+    send(client.ws,id);
+    const result=await usage();expect(result.local.attempts).toBe(4);expect(result.local.judge.attempts).toBe(2);
+    expect(result.local.neurons).toBeCloseTo(8.91);expect(result.local.unmeasuredAttempts).toBe(1);
   });
 });
 describe("model settings and conversation cleanup", () => {

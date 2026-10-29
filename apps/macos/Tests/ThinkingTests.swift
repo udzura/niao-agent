@@ -14,13 +14,32 @@ final class ThinkingTests: XCTestCase {
         let event = try JSONDecoder().decode(ServerEvent.self, from: Data("{\"v\":1,\"type\":\"settings_updated\",\"settings\":\(current)}".utf8))
         XCTAssertEqual(event.settings?.thinkingEnabled, true)
     }
-    func testModelSettingsRequestEncodesTheModelAndBooleanTogether() throws {
-        for enabled in [false,true] {
-            let request = ModelSettingsUpdate(modelId: "gemma", thinkingEnabled: enabled)
+    func testModelSettingsRequestEncodesEachThinkingModeWithoutALegacyBoolean() throws {
+        for mode in ThinkingMode.allCases {
+            let request = ModelSettingsUpdate(modelId: "gemma", thinkingMode: mode)
             let body = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(request)) as? [String:Any])
             XCTAssertEqual(body["modelId"] as? String, "gemma")
-            XCTAssertEqual(body["thinkingEnabled"] as? Bool, enabled)
+            XCTAssertEqual(body["thinkingMode"] as? String, mode.rawValue)
+            XCTAssertNil(body["thinkingEnabled"])
         }
+    }
+    func testAutomaticModeSurvivesSettingsAndHistoryDecoding() throws {
+        let settings = #"{"v":1,"epoch":0,"modelId":"gemma","thinkingMode":"auto","thinkingEnabled":false,"models":[]}"#
+        let decoded = try JSONDecoder().decode(AgentSettings.self,from:Data(settings.utf8))
+        XCTAssertEqual(decoded.thinkingMode, .automatic)
+        let history = "{\"v\":1,\"messages\":[],\"cursor\":0,\"hasMore\":false,\"turns\":[],\"active\":null,\"settings\":\(settings)}"
+        XCTAssertEqual(try JSONDecoder().decode(HistoryPage.self,from:Data(history.utf8)).settings?.thinkingMode,.automatic)
+    }
+    func testJudgeUsageIsIncludedOnceAndKeepsDurationSeparateFromNeurons() throws {
+        let raw = #"{"v":1,"dayStart":"2026-10-29T00:00:00Z","dayEnd":"2026-10-30T00:00:00Z","asOf":"now","account":{"status":"not_configured","neurons":null,"queriedAt":null,"errorCode":null},"local":{"neurons":8.455,"attempts":3,"unmeasuredAttempts":0,"trackingSince":"now","judge":{"neurons":3.455,"attempts":1,"unmeasuredAttempts":0,"calculatedAttempts":1,"totalDurationMs":480,"timedAttempts":1}}}"#
+        let usage = try JSONDecoder().decode(UsageSnapshot.self,from:Data(raw.utf8))
+        XCTAssertEqual(usage.displayedNeurons,8.455)
+        XCTAssertEqual(usage.scopeLabel,"Niao 記録・換算分")
+        XCTAssertEqual(usage.local.judge?.totalDurationMs,480)
+        let available = raw.replacingOccurrences(of:#""status":"not_configured","neurons":null"#,with:#""status":"available","neurons":10"#)
+        let account = try JSONDecoder().decode(UsageSnapshot.self,from:Data(available.utf8))
+        XCTAssertEqual(account.displayedNeurons,10) // Account already includes judge usage.
+        XCTAssertEqual(account.scopeLabel,"アカウント全体")
     }
     func testLegacyMessagesHaveNoThinkingAndNewHistoryRestoresSegments() throws {
         let legacy = #"{"seq":1,"id":"a","requestId":"r","role":"assistant","content":"answer","createdAt":"now"}"#

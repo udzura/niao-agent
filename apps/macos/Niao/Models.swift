@@ -119,10 +119,19 @@ struct UsageSnapshot: Decodable {
         let errorCode: String?
     }
     struct Local: Decodable {
+        struct Judge: Decodable {
+            let neurons: Double
+            let attempts: Int
+            let unmeasuredAttempts: Int
+            let calculatedAttempts: Int
+            let totalDurationMs: Double
+            let timedAttempts: Int
+        }
         let neurons: Double
         let attempts: Int
         let unmeasuredAttempts: Int
         let trackingSince: String
+        let judge: Judge?
     }
     let v: Int
     let dayStart: String
@@ -133,7 +142,7 @@ struct UsageSnapshot: Decodable {
 
     var accountAvailable: Bool { account.status == "available" && account.neurons != nil }
     var displayedNeurons: Double { accountAvailable ? account.neurons! : local.neurons }
-    var scopeLabel: String { accountAvailable ? "アカウント全体" : "Niao 記録分" }
+    var scopeLabel: String { accountAvailable ? "アカウント全体" : (local.judge?.calculatedAttempts ?? 0) > 0 ? "Niao 記録・換算分" : "Niao 記録分" }
     static func parseDate(_ value: String) -> Date? {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -153,6 +162,13 @@ struct UsageSnapshot: Decodable {
     }
 }
 
+enum ThinkingMode: String, Codable, CaseIterable, Identifiable {
+    case automatic = "auto", on, off
+    var id: String { rawValue }
+    var label: String {
+        switch self { case .automatic: "自動"; case .on: "常にON"; case .off: "常にOFF" }
+    }
+}
 struct AgentSettings: Decodable {
     struct Model: Decodable, Identifiable {
         let id: String
@@ -161,18 +177,20 @@ struct AgentSettings: Decodable {
     }
     let v: Int
     let modelId: String
-    let thinkingEnabled: Bool
+    let thinkingMode: ThinkingMode
+    var thinkingEnabled: Bool { thinkingMode == .on }
     let epoch: Int
     let models: [Model]
-    private enum CodingKeys: String, CodingKey { case v, modelId, thinkingEnabled, epoch, models }
+    private enum CodingKeys: String, CodingKey { case v, modelId, thinkingMode, thinkingEnabled, epoch, models }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         v = try values.decode(Int.self, forKey: .v)
         modelId = try values.decode(String.self, forKey: .modelId)
-        thinkingEnabled = try values.decodeIfPresent(Bool.self, forKey: .thinkingEnabled) ?? false
+        if let mode = try values.decodeIfPresent(ThinkingMode.self, forKey: .thinkingMode) { thinkingMode = mode }
+        else { thinkingMode = try values.decodeIfPresent(Bool.self, forKey: .thinkingEnabled) == true ? .on : .off }
         epoch = try values.decode(Int.self, forKey: .epoch)
         models = try values.decode([Model].self, forKey: .models)
     }
 }
-struct ModelSettingsUpdate: Encodable { let modelId: String; let thinkingEnabled: Bool }
+struct ModelSettingsUpdate: Encodable { let modelId: String; let thinkingMode: ThinkingMode }
 struct ClearHistoryResult: Decodable { let v: Int; let epoch: Int }

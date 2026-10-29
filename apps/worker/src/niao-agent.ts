@@ -1,8 +1,9 @@
 import { rubyExecutor } from "./ruby/tool";
 import { Agent, type Connection, type ConnectionContext, type WSMessage } from "agents";
 import type { Env } from "./index";
-import { boundedContext, DEFAULT_MODEL, MODELS, isModelID, type ModelID, WorkersAIModel, type ChatModel, type ModelMessage } from "./model";
+import { boundedContext, DEFAULT_MODEL, MODELS, isModelID, supportsThinking, type ModelID, WorkersAIModel, type ChatModel, type ModelMessage } from "./model";
 import { ChatError, errorCode, parseSubmission, type Message, type Turn, type ThinkingSegment } from "./protocol";
+import { ClefThinkingJudge, isThinkingMode, thinkingPolicy, JUDGE_MODEL, type ThinkingMode, type ThinkingPolicy, type ThinkingJudge } from "./thinking-policy";
 
 import { UsageAnalytics, utcDay, validNeurons } from "./usage";
 
@@ -34,6 +35,10 @@ export class NiaoAgent extends Agent<Env> {
     this.sql`CREATE TABLE IF NOT EXISTS niao_usage_attempts (
       id TEXT PRIMARY KEY, startedAt TEXT NOT NULL, neurons REAL
     )`;
+    this.sql`CREATE TABLE IF NOT EXISTS niao_judge_attempts (
+      id TEXT PRIMARY KEY, durationMs REAL, score REAL, reason TEXT,
+      usageSource TEXT, inputTokens INTEGER, neuronsPerMillion REAL
+    )`;
     this.sql`CREATE INDEX IF NOT EXISTS niao_usage_day ON niao_usage_attempts(startedAt)`;
     this.sql`CREATE TABLE IF NOT EXISTS niao_usage_meta (id INTEGER PRIMARY KEY, trackingSince TEXT NOT NULL)`;
     this.sql`INSERT OR IGNORE INTO niao_usage_meta VALUES (1, ${new Date().toISOString()})`;
@@ -43,6 +48,16 @@ export class NiaoAgent extends Agent<Env> {
       this.sql`ALTER TABLE niao_settings ADD COLUMN thinkingEnabled INTEGER NOT NULL DEFAULT 0 CHECK (thinkingEnabled IN (0,1))`;
     }
     this.sql`INSERT OR IGNORE INTO niao_settings (id, modelId, epoch) VALUES (1, ${DEFAULT_MODEL}, 0)`;
+    const columns = this.sql<{name:string}>`PRAGMA table_info(niao_settings)`;
+    if (!columns.some(column => column.name === "thinkingMode")) {
+      this.ctx.storage.transactionSync(() => {
+        this.sql`ALTER TABLE niao_settings ADD COLUMN thinkingMode TEXT NOT NULL DEFAULT 'off' CHECK (thinkingMode IN ('auto','on','off'))`;
+        this.sql`UPDATE niao_settings SET thinkingMode = CASE WHEN thinkingEnabled = 1 THEN 'on' ELSE 'off' END`;
+      });
+    }
+    if (!columns.some(column => column.name === "thinkingPolicy")) {
+      this.sql`ALTER TABLE niao_settings ADD COLUMN thinkingPolicy TEXT NOT NULL DEFAULT '{}'`;
+    }
     // A fresh isolate cannot resume an in-flight provider stream. Keep the user message;
     // require an explicit retry instead of silently charging for another generation.
     this.sql`UPDATE niao_turns SET status = 'failed', errorCode = 'interrupted' WHERE status = 'running'`;
@@ -63,7 +78,7 @@ export class NiaoAgent extends Agent<Env> {
     if (url.pathname.endsWith("/settings")) {
       if (request.method === "GET") return this.json(this.settingsResponse());
       if (request.method !== "PUT") return this.json({code: "method_not_allowed"}, 405);
-      let body: {modelId?: unknown; thinkingEnabled?: unknown};
+      let body: {modelId?: unknown; thinkingEnabled?: unknown; thinkingMode?: unknown; thinkingPolicy?: unknown};
       try {
         if (!request.headers.get("Content-Type")?.startsWith("application/json")) return this.json({code: "invalid_settings"}, 400);
         const text = await request.text();
@@ -72,9 +87,16 @@ export class NiaoAgent extends Agent<Env> {
       } catch { return this.json({code: "invalid_settings"}, 400); }
       if (!body || !isModelID(body.modelId)) return this.json({code: "unsupported_model"}, 400);
       if (body.thinkingEnabled !== undefined && typeof body.thinkingEnabled !== "boolean") return this.json({code: "invalid_settings"}, 400);
-      // Older clients may update only the model; preserve the saved option.
-      const thinkingEnabled = body.thinkingEnabled ?? this.settings().thinkingEnabled;
-      this.sql`UPDATE niao_settings SET modelId = ${body.modelId}, thinkingEnabled = ${thinkingEnabled ? 1 : 0} WHERE id = 1`;
+      if (body.thinkingMode !== undefined && (!isThinkingMode(body.thinkingMode) || body.thinkingEnabled !== undefined)) return this.json({code:"invalid_settings"},400);
+      const current = this.settings();
+      const mode = (body.thinkingMode as ThinkingMode | undefined) ??
+        (body.thinkingEnabled === undefined ? current.thinkingMode : body.thinkingEnabled ? "on" : "off");
+      let policy: ThinkingPolicy;
+      try { policy = body.thinkingPolicy === undefined ? current.thinkingPolicy : thinkingPolicy(body.thinkingPolicy,current.thinkingPolicy); }
+      catch { return this.json({code:"invalid_settings"},400); }
+      // Keep the legacy boolean for rollback/old clients; model-only updates preserve auto.
+      this.sql`UPDATE niao_settings SET modelId = ${body.modelId}, thinkingEnabled = ${mode === "on" ? 1 : 0},
+        thinkingMode = ${mode}, thinkingPolicy = ${JSON.stringify(policy)} WHERE id = 1`;
       this.publish({type: "settings_updated", settings: this.settingsResponse()});
       return this.json(this.settingsResponse());
     }
@@ -120,8 +142,15 @@ export class NiaoAgent extends Agent<Env> {
         COUNT(*) - COUNT(neurons) AS unmeasuredAttempts FROM niao_usage_attempts
       WHERE startedAt >= ${period.dayStart} AND startedAt < ${period.dayEnd}`[0];
     const {trackingSince} = this.sql<{trackingSince: string}>`SELECT trackingSince FROM niao_usage_meta WHERE id = 1`[0];
+    const judge = this.sql<{neurons:number;attempts:number;unmeasuredAttempts:number;calculatedAttempts:number;totalDurationMs:number;timedAttempts:number}>`
+      SELECT COALESCE(SUM(a.neurons),0) AS neurons, COUNT(*) AS attempts,
+        COUNT(*) - COUNT(a.neurons) AS unmeasuredAttempts,
+        COALESCE(SUM(CASE WHEN j.usageSource = 'rate' THEN 1 ELSE 0 END),0) AS calculatedAttempts,
+        COALESCE(SUM(j.durationMs),0) AS totalDurationMs, COUNT(j.durationMs) AS timedAttempts
+      FROM niao_judge_attempts j JOIN niao_usage_attempts a ON a.id = j.id
+      WHERE a.startedAt >= ${period.dayStart} AND a.startedAt < ${period.dayEnd}`[0];
     return Response.json({v: 1, ...period, asOf: new Date().toISOString(), account,
-      local: {...recorded, trackingSince}}, {headers: {"Cache-Control": "no-store"}});
+      local: {...recorded, trackingSince, judge}}, {headers: {"Cache-Control": "no-store"}});
   }
 
   private withThinking(messages: Message[]): Message[] {
@@ -131,13 +160,14 @@ export class NiaoAgent extends Agent<Env> {
       return rows.length ? {...message,thinking:rows.map(row => ({...row,active:false}))} : message;
     });
   }
-  private settings(): {modelId: ModelID; epoch: number; thinkingEnabled: boolean} {
-    const row = this.sql<{modelId: ModelID; epoch: number; thinkingEnabled: number}>`SELECT modelId, epoch, thinkingEnabled FROM niao_settings WHERE id = 1`[0];
-    return {...row, thinkingEnabled: row.thinkingEnabled === 1};
+  private settings(): {modelId: ModelID; epoch: number; thinkingMode:ThinkingMode; thinkingPolicy:ThinkingPolicy} {
+    const row = this.sql<{modelId:ModelID;epoch:number;thinkingMode:ThinkingMode;thinkingPolicy:string}>`SELECT modelId, epoch, thinkingMode, thinkingPolicy FROM niao_settings WHERE id = 1`[0];
+    return {...row,thinkingPolicy:thinkingPolicy(JSON.parse(row.thinkingPolicy))};
   }
-  private settingsResponse() { return {v: 1, ...this.settings(), models: MODELS}; }
+  private settingsResponse() { const settings = this.settings(); return {v:1,...settings,thinkingEnabled:settings.thinkingMode === "on",models:MODELS}; }
   private json(data: object, status = 200) { return Response.json(data, {status, headers: {"Cache-Control": "no-store"}}); }
   protected createModel(modelId: ModelID, thinkingEnabled: boolean): ChatModel { return new WorkersAIModel(this.env.AI, modelId, rubyExecutor(this.env.RUBY_RUNNER), thinkingEnabled); }
+  protected createThinkingJudge(): ThinkingJudge { return new ClefThinkingJudge(this.env.AI); }
 
   async onMessage(connection: Connection, raw: WSMessage) {
     let requestId: string | undefined;
@@ -181,11 +211,15 @@ export class NiaoAgent extends Agent<Env> {
   }
 
   private async generate(requestId: string) {
-    const {modelId, thinkingEnabled} = this.settings(); // Snapshot both for the whole turn, including tool continuations.
+    const {modelId, thinkingMode, thinkingPolicy: policy} = this.settings(); // Snapshot policy for the whole turn.
     const start = Date.now();
-    let attemptId = crypto.randomUUID();
-    this.sql`INSERT INTO niao_usage_attempts (id, startedAt) VALUES (${attemptId}, ${new Date(start).toISOString()})`;
-    log("llm.start", {requestId, model: modelId});
+    const startAttempt = () => {
+      const id = crypto.randomUUID();
+      this.sql`INSERT INTO niao_usage_attempts (id, startedAt) VALUES (${id}, ${new Date().toISOString()})`;
+      return id;
+    };
+    let attemptId: string;
+    log("llm.start", {requestId, model:modelId, thinkingMode});
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     // A hard deadline covers binding setup as well as stalled reads. The race prevents
@@ -211,6 +245,26 @@ export class NiaoAgent extends Agent<Env> {
       };
       let usage: Record<string, number> = {};
       const consume = async () => {
+        let thinkingEnabled = thinkingMode === "on";
+        if (thinkingMode === "auto" && supportsThinking(modelId)) {
+          const id = this.ctx.storage.transactionSync(() => {
+            const id = startAttempt();
+            this.sql`INSERT INTO niao_judge_attempts (id) VALUES (${id})`;
+            return id;
+          });
+          const decision = await this.createThinkingJudge().decide(recent,policy,controller.signal);
+          const receipt = decision.usage;
+          this.ctx.storage.transactionSync(() => {
+            this.sql`UPDATE niao_usage_attempts SET neurons = ${receipt.neurons} WHERE id = ${id}`;
+            this.sql`UPDATE niao_judge_attempts SET durationMs = ${decision.durationMs}, score = ${decision.score}, reason = ${decision.reason},
+              usageSource = ${receipt.source}, inputTokens = ${receipt.inputTokens}, neuronsPerMillion = ${receipt.neuronsPerMillion} WHERE id = ${id}`;
+          });
+          log("thinking.decision", {requestId,model:JUDGE_MODEL,enabled:decision.enabled,score:decision.score,reason:decision.reason,
+            durationMs:decision.durationMs,neurons:receipt.neurons,usageSource:receipt.source});
+          thinkingEnabled = decision.enabled;
+        }
+        controller.signal.throwIfAborted();
+        attemptId = startAttempt();
         for await (const part of this.createModel(modelId, thinkingEnabled).stream(boundedContext(recent), controller.signal)) {
           controller.signal.throwIfAborted();
           if ("text" in part) {
@@ -227,9 +281,8 @@ export class NiaoAgent extends Agent<Env> {
             segment.text += delta; segment.active = active;
             publishPartial();
           } else if ("inferenceStarted" in part) {
-            attemptId = crypto.randomUUID();
+            attemptId = startAttempt();
             usage = {};
-            this.sql`INSERT INTO niao_usage_attempts (id, startedAt) VALUES (${attemptId}, ${new Date().toISOString()})`;
           } else if ("toolStatus" in part) {
             this.publish({type:"tool_status",requestId,name:"ruby_eval",status:part.toolStatus});
             log("tool.execution", {requestId,name:"ruby_eval",status:part.toolStatus});

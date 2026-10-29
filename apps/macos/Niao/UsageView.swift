@@ -32,6 +32,17 @@ struct UsageView: View {
                             Text("アカウント内の他のアプリ・モデルの使用量も含みます。確定請求額や残り利用可能量ではありません。")
                         }
                         Text("Niao 記録分: \(usage.local.neurons.formatted(.number.precision(.fractionLength(0...2)))) Neurons / \(usage.local.attempts) 回の呼び出し")
+                        if let judge = usage.local.judge, judge.attempts > 0 {
+                            Text("うちThinking判定: \(judge.neurons.formatted(.number.precision(.fractionLength(0...2)))) Neurons / \(judge.attempts) 回")
+                            Text("判定の累計待ち時間: \((judge.totalDurationMs / 1000).formatted(.number.precision(.fractionLength(0...2)))) 秒")
+                            if judge.timedAttempts > 0 {
+                                Text("判定の平均待ち時間: \((judge.totalDurationMs / Double(judge.timedAttempts)).formatted(.number.precision(.fractionLength(0...0)))) ms")
+                            }
+                            if judge.calculatedAttempts > 0 {
+                                Text("判定の使用量は公式レートによる換算値を含みます（Niao合計に加算済み）。")
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
                         if usage.local.unmeasuredAttempts > 0 {
                             Text("使用量未取得の呼び出し: \(usage.local.unmeasuredAttempts) 回（実行中・失敗・中断など）。記録値は総使用量を下回る場合があります。")
                         }
