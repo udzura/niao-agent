@@ -39,7 +39,7 @@ struct ChatView: View {
                         if store.busy {
                             VStack(alignment: .leading, spacing: 8) {
                                 HStack { ProgressView().controlSize(.small); Text(store.toolRunning ? "Niao · Rubyで計算中" : "Niao · 生成中").font(.caption).foregroundStyle(.secondary) }
-                                if let text = store.partial?.text, !text.isEmpty { Text(text).textSelection(.enabled) }
+                                if let text = store.partial?.text, !text.isEmpty { ChatMarkdownView(content: text) }
                             }.padding(12).frame(maxWidth: .infinity, alignment: .leading)
                                 .background(.quaternary, in: RoundedRectangle(cornerRadius: 12))
                         }
@@ -89,7 +89,7 @@ struct MessageRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(message.role == "user" ? "あなた" : "Niao").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-            Text(message.content).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+            ChatMarkdownView(content: message.content)
         }
         .padding(12)
         .background(message.role == "user" ? Color.accentColor.opacity(0.08) : Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 12))
