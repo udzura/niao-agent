@@ -103,6 +103,7 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var url = ""
     @State private var token = ""
+    @State private var credentialBusy = false
     @State private var selectedModel = ""
     @State private var error: String?
     var body: some View {
@@ -111,8 +112,10 @@ struct SettingsView: View {
             Form {
                 TextField("バックエンド URL", text: $url)
                 SecureField("アクセストークン", text: $token)
-            }
-            Text("トークンは接続先ごとに macOS Keychain へ保存します。ローカル開発では http://127.0.0.1:8787 を指定します。")
+            }.disabled(credentialBusy)
+            Button("保存済みトークンを読み込む") { Task { await loadToken() } }
+                .disabled(credentialBusy)
+            Text("トークンは接続先ごとに macOS Keychain へ保存します。アクセス前にTouch IDまたはMacのパスワードで本人確認します。")
                 .font(.caption).foregroundStyle(.secondary)
             Divider()
             if let settings = store.agentSettings {
@@ -130,23 +133,42 @@ struct SettingsView: View {
             if let error = error ?? store.error { Text(error).font(.caption).foregroundStyle(.red) }
             HStack {
                 Spacer()
-                Button("キャンセル") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("キャンセル") { dismiss() }.keyboardShortcut(.cancelAction).disabled(credentialBusy)
                 Button("保存して接続") {
-                    do { try store.saveSettings(url: url, token: token); dismiss() }
-                    catch { self.error = error.localizedDescription }
-                }.keyboardShortcut(.defaultAction)
+                    credentialBusy = true
+                    Task {
+                        defer { credentialBusy = false }
+                        do { try await store.saveSettings(url: url, token: token); dismiss() }
+                        catch { self.error = error.localizedDescription }
+                    }
+                }.keyboardShortcut(.defaultAction).disabled(credentialBusy)
             }
         }.padding(24).frame(width: 480)
         .onAppear {
             selectedModel = store.agentSettings?.modelId ?? ""
             url = store.backendURL
-            do { token = try Keychain.read(backend: url) } catch { self.error = error.localizedDescription }
         }
+        .task { await loadToken() }
         .onChange(of: store.agentSettings?.modelId) { _, value in selectedModel = value ?? "" }
         .onChange(of: url) { _, value in
             guard value != store.backendURL else { return }
-            // Do not silently reuse a production credential for a different host.
-            token = (try? Keychain.read(backend: value)) ?? ""
+            // Reading a saved credential is explicit; don't prompt on every keystroke.
+            token = ""
+            error = nil
         }
     }
+    @MainActor private func loadToken() async {
+        guard !credentialBusy else { return }
+        credentialBusy = true
+        defer { credentialBusy = false }
+        do {
+            let backend = try BackendURL.validate(url).absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            let saved = try await Keychain.read(backend: backend)
+            try Task.checkCancellation()
+            token = saved
+            error = nil
+        } catch is CancellationError { }
+        catch { self.error = error.localizedDescription }
+    }
+
 }

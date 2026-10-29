@@ -35,6 +35,7 @@ final class ChatStore: ObservableObject {
     private var socket: URLSessionWebSocketTask?
     private var generation = UUID()
     private var cursor = 0 // Only HTTP advances the cursor, never WebSocket arrival order.
+    private var authenticationBlocked = false
     private var retryAttempt = 0
     private var eventRevision = 0
     private let outboxURL: URL
@@ -60,11 +61,15 @@ final class ChatStore: ObservableObject {
         NotificationCenter.default.addObserver(self, selector: #selector(wake), name: NSApplication.didBecomeActiveNotification, object: nil)
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(wake), name: NSWorkspace.didWakeNotification, object: nil)
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(sleep), name: NSWorkspace.willSleepNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(sleep), name: NSWorkspace.screensDidSleepNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(sleep), name: NSWorkspace.sessionDidResignActiveNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(wake), name: NSWorkspace.screensDidWakeNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(wake), name: NSWorkspace.sessionDidBecomeActiveNotification, object: nil)
     }
     var busy: Bool { partial != nil || turns.contains { $0.status == "running" } }
     var canSend: Bool { connected && !controlBusy && !busy && outbox == nil && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && draft.utf16.count <= 8000 }
 
-    func saveSettings(url: String, token: String) throws {
+    func saveSettings(url: String, token: String) async throws {
         let valid = try BackendURL.validate(url).absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         let secret = token.trimmingCharacters(in: .whitespacesAndNewlines)
         guard secret.count >= 32, !secret.contains("\n"), !secret.contains("\r") else { throw NiaoError.configuration }
@@ -72,7 +77,8 @@ final class ChatStore: ObservableObject {
         if valid != backendURL && outbox != nil {
             throw NSError(domain: "Niao", code: 1, userInfo: [NSLocalizedDescriptionKey: "未送信メッセージを再送するか破棄してから接続先を変更してください。"])
         }
-        try Keychain.save(secret, backend: valid)
+        try await Keychain.save(secret, backend: valid)
+        try Task.checkCancellation()
         backendURL = valid
         UserDefaults.standard.set(valid, forKey: "backendURL")
         messages = []; cursor = 0; turns = []; partial = nil
@@ -82,8 +88,8 @@ final class ChatStore: ObservableObject {
         reconnect()
     }
     func start() { if loop == nil { reconnect() } }
-    @objc private func wake() { if !connected { reconnect() } }
-    @objc private func sleep() { disconnect(); connection = "スリープ中" }
+    @objc private func wake() { if !connected && loop == nil && !authenticationBlocked { reconnect() } }
+    @objc private func sleep() { Keychain.lock(); disconnect(); connection = "ロック中" }
     private func disconnect() {
         generation = UUID()
         controlBusy = false
@@ -97,6 +103,7 @@ final class ChatStore: ObservableObject {
         partial = nil
     }
     func reconnect() {
+        authenticationBlocked = false
         disconnect()
         let id = generation
         loop = Task { [weak self] in await self?.run(id: id) }
@@ -107,7 +114,8 @@ final class ChatStore: ObservableObject {
             do {
                 connection = retryAttempt == 0 ? "接続中…" : "再接続中…"
                 let base = try BackendURL.validate(backendURL)
-                let token = try Keychain.read(backend: backendURL)
+                let token = try await Keychain.read(backend: backendURL)
+                guard generation == id, !Task.isCancelled else { return }
                 guard token.count >= 32 else { throw NiaoError.configuration }
                 let backend = Backend(baseURL: base, token: token)
                 self.backend = backend
@@ -164,6 +172,8 @@ final class ChatStore: ObservableObject {
                 socket?.cancel(with: .goingAway, reason: nil); socket = nil
                 if case NiaoError.unauthorized = error { return }
                 if case NiaoError.configuration = error { return }
+                if case NiaoError.authentication = error { authenticationBlocked = true; return }
+                if case NiaoError.keychain = error { authenticationBlocked = true; return }
                 retryAttempt += 1
                 let delay = min(pow(2.0, Double(min(retryAttempt, 5))), 30) + Double.random(in: 0...1)
                 do { try await Task.sleep(for: .seconds(delay)) } catch { return }

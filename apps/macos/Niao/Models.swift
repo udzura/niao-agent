@@ -54,11 +54,12 @@ struct StoredSubmission: Codable {
 }
 
 enum NiaoError: LocalizedError {
-    case configuration, unauthorized, api(String), http(Int), protocolMismatch, keychain(OSStatus)
+    case configuration, unauthorized, authentication(String), api(String), http(Int), protocolMismatch, keychain(OSStatus)
     var errorDescription: String? {
         switch self {
         case .configuration: "HTTPS のバックエンド URL とトークンを設定してください。HTTP は localhost のみ使用できます。"
         case .unauthorized: "認証に失敗しました。設定のトークンを確認してください。"
+        case .authentication(let message): message
         case .api(let code): explanation(code)
         case .http(let code): "サーバーに接続できません (HTTP \(code))。"
         case .protocolMismatch: "サーバーの通信形式を確認してください。"

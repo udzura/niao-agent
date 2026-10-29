@@ -1,7 +1,43 @@
 import Foundation
 import Security
+import LocalAuthentication
 
-enum Keychain {
+@MainActor
+final class Keychain {
+    private static let session = CredentialSession(authenticate: authenticate, read: { backend in
+        try await Task.detached { try StoredKeychain.read(backend: backend) }.value
+    }, save: { token, backend in
+        try await Task.detached { try StoredKeychain.save(token, backend: backend) }.value
+    })
+    static func read(backend: String) async throws -> String { try await session.read(backend: backend) }
+    static func save(_ token: String, backend: String) async throws { try await session.save(token, backend: backend) }
+    static func lock() { session.lock() }
+    private static func authenticate() async throws {
+        let context = LAContext()
+        context.localizedCancelTitle = "キャンセル"
+        var error: NSError?
+        guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &error) else {
+            throw NiaoError.authentication("このMacで本人確認を開始できません。Touch IDまたはログインパスワードの設定を確認してください。")
+        }
+        do {
+            try await withTaskCancellationHandler {
+                try Task.checkCancellation()
+                let accepted = try await context.evaluatePolicy(.deviceOwnerAuthentication,
+                    localizedReason: "Niaoの接続トークンをKeychainから利用します。")
+                guard accepted else { throw NiaoError.authentication("本人確認が完了しませんでした。") }
+                try Task.checkCancellation()
+            } onCancel: { context.invalidate() }
+        } catch is CancellationError { throw CancellationError() }
+        catch {
+            if Task.isCancelled { throw CancellationError() }
+            throw NiaoError.authentication("本人確認を完了できませんでした。再接続するともう一度認証できます。")
+        }
+    }
+}
+
+// Existing file-based Keychain records are retained for ad-hoc build compatibility.
+// These methods run off the main thread after the app-level authentication gate.
+private enum StoredKeychain {
     private static func query(_ backend: String) -> [String: Any] {
         [kSecClass as String: kSecClassGenericPassword,
          kSecAttrService as String: "dev.niao.Niao.backend-token",

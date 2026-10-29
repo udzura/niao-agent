@@ -140,3 +140,9 @@ Wrangler and Xcode initially encountered this execution environment's filesystem
 - The overlay passes through hit testing, uses opacity/move/scale transitions, and respects Reduce Motion. It reports observed tool usage, not execution success.
 - All 19 Swift tests and the macOS Xcode build pass. Three new tests cover expiry refresh, stale timer races, fresh/reset notices and event deduplication including completion-only observations.
 - Rendered the actual overlay with a rendering-only store fixture in hidden NSHostingViews for light/dark layout inspection. Both previews asserted automatic dismissal after the real view task ran. This used no live chat data, credentials or backend requests. In-app end-to-end interaction remains a manual smoke check. No Worker changes or deployment are required.
+
+## App-level owner authentication for Keychain — 2026-10-29
+
+- Added LocalAuthentication owner authentication before app Keychain reads/writes, shared for the awake app session and invalidated on system/display sleep and session deactivation. Authentication cancellation/errors stop automatic reconnect prompts; Keychain work runs off the main thread.
+- Existing file-based Keychain records and ad-hoc signing are retained. This is an explicit application gate, not a SecAccessControl/Data Protection Keychain migration or a replacement for the OS Keychain access dialog. The scope is documented in keychain-auth.md.
+- All 24 Swift tests and Xcode build pass. Five injected-session tests cover denial, retry, authentication reuse, concurrent access, locking during authentication and rejection of results returned after a lock. No live credentials, authentication dialogs or Touch ID hardware were accessed during testing; actual OS interaction requires the documented manual checks.
