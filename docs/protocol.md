@@ -11,7 +11,7 @@ Base URL is an HTTPS origin, or HTTP loopback in development. All requests requi
 {
   "v": 1,
   "epoch": 0,
-  "settings": {"v":1,"modelId":"@cf/google/gemma-4-26b-a4b-it","epoch":0,"models":[{"id":"@cf/google/gemma-4-26b-a4b-it","name":"Gemma 4 · 26B A4B"},{"id":"@cf/zai-org/glm-4.7-flash","name":"GLM 4.7 Flash"}]},
+  "settings": {"v":1,"modelId":"@cf/google/gemma-4-26b-a4b-it","thinkingEnabled":false,"epoch":0,"models":[{"id":"@cf/google/gemma-4-26b-a4b-it","name":"Gemma 4 · 26B A4B","supportsThinking":true},{"id":"@cf/zai-org/glm-4.7-flash","name":"GLM 4.7 Flash","supportsThinking":false}]},
   "messages": [{
     "seq": 1, "id": "UUID", "requestId": "UUID", "role": "user",
     "content": "Hello", "createdAt": "2026-10-27T00:00:00.000Z"
@@ -75,7 +75,9 @@ Thinking is saved separately only when the assistant turn successfully commits. 
 
 ## Settings and cleanup
 
-`GET /agents/niao-agent/personal/settings` returns `{v,modelId,epoch,models:[{id,name}]}`. `PUT` on the same path accepts JSON `{modelId}` from the advertised list, persists it, broadcasts `settings_updated`, and returns the settings. Unsupported models return 400 `unsupported_model`; malformed JSON returns 400 `invalid_settings`. Each inference snapshots the model at its start; retries of a failed turn use the current model, while retries of completed turns still return the persisted response.
+`GET /agents/niao-agent/personal/settings` returns `{v,modelId,thinkingEnabled,epoch,models:[{id,name,supportsThinking}]}`. `PUT` on the same path accepts JSON `{modelId,thinkingEnabled?}` from the advertised model list, atomically persists both fields, broadcasts `settings_updated`, and returns the settings. `thinkingEnabled` must be a JSON boolean; omission preserves the current value for older clients. New and migrated settings default to `false`. Unsupported models return 400 `unsupported_model`; malformed JSON or an invalid thinking value returns 400 `invalid_settings` without changing either field.
+
+The thinking option is stored with the selected model (one option, not per-model preferences), and only applied when that model advertises `supportsThinking:true` (currently Gemma 4). Switching to GLM preserves the option but keeps inference thinking disabled; switching back to Gemma reapplies it. A turn snapshots both settings at its start, including all tool continuations. Retries of a failed turn use current settings, while retries of completed turns still return the persisted response. Older servers may omit the new fields; native clients default to OFF and do not offer a toggle for models without declared support.
 
 `DELETE /agents/niao-agent/personal/history` requires `If-Match: "<epoch>"`, using the numeric epoch from settings/history. Missing or malformed preconditions return 428 `precondition_required`, stale epochs return 409 `history_changed`, and active inference returns 409 `busy`. Success atomically deletes messages/turns and increments the epoch, then broadcasts `history_cleared` and returns `{v,epoch}`. Model selection, usage records, and the monotonically increasing SQLite sequence remain intact. Repeating an old DELETE cannot clear a newly started conversation.
 

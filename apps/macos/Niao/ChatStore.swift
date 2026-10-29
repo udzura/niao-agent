@@ -268,7 +268,7 @@ final class ChatStore: ObservableObject {
         if let pending = outbox, (pending.epoch ?? 0) != incoming { clearOutbox() }
         return true
     }
-    func updateModel(_ modelId: String) {
+    func updateModelSettings(_ modelId: String, thinkingEnabled: Bool) {
         guard connected, !controlBusy, let backend else { return }
         controlBusy = true
         let id = generation
@@ -276,7 +276,7 @@ final class ChatStore: ObservableObject {
         Task {
             defer { if generation == id { controlBusy = false } }
             do {
-                let settings = try await backend.updateModel(modelId)
+                let settings = try await backend.updateModelSettings(modelId, thinkingEnabled: thinkingEnabled)
                 guard generation == id else { return }
                 if eventRevision == revision { agentSettings = settings }
                 error = nil

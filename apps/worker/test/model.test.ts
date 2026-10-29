@@ -24,6 +24,21 @@ describe("Workers AI adapter", () => {
     for await (const part of adapter.stream([], new AbortController().signal)) parts.push(part);
     expect(selected).toBe("@cf/zai-org/glm-4.7-flash"); expect(parts).toEqual([{text: "ok"}]);
   });
+  it("applies the saved thinking option only to supported models", async () => {
+    for (const [modelId,enabled,expected] of [
+      ['@cf/google/gemma-4-26b-a4b-it',false,false],
+      ['@cf/google/gemma-4-26b-a4b-it',true,true],
+      ['@cf/zai-org/glm-4.7-flash',true,false],
+    ] as const) {
+      const ai = {run:async (_model:string,input:any) => {
+        expect(input.chat_template_kwargs.enable_thinking).toBe(expected);
+        return stream('data: {"choices":[{"delta":{"content":"answer"}}]}\n\ndata: [DONE]\n\n');
+      }} as unknown as Ai;
+      const events = [];
+      for await (const event of new WorkersAIModel(ai,modelId,undefined,enabled).stream([],new AbortController().signal)) events.push(event);
+      expect(events).toContainEqual({text:'answer'});
+    }
+  });
   it("decodes split UTF-8, CRLF, reasoning-only frames and safe usage", async () => {
     const parts = await collect(': ping\r\n\r\ndata: {"choices":[{"delta":{"reasoning_content":"private"}}]}\r\n\r\ndata: {"choices":[{"delta":{"content":"こんにちは"}}]}\r\n\r\ndata: {"usage":{"total_tokens":8,"prompt":"private"}}\r\n\r\ndata: [DONE]\r\n\r\n');
     expect(parts).toEqual([{reasoning:"private"}, {text: "こんにちは"}, {usage: {total_tokens: 8}}]);
@@ -112,13 +127,14 @@ it('keeps Gemma thinking per generation around ruby_eval and excludes it from fo
   const requests: any[]=[];
   const frame=(delta:unknown)=>`data: ${JSON.stringify({choices:[{delta}]})}\n\n`;
   const ai={run:async (_model:string,input:any)=>{
+    expect(input.chat_template_kwargs.enable_thinking).toBe(true);
     requests.push(JSON.parse(JSON.stringify(input)));
     if (round++===0) return stream(frame({content:'<|channel>thought\nfirst private thought<channel|>'})+
       frame({tool_calls:[{index:0,id:'thinking_tool',function:{name:'ruby_eval',arguments:JSON.stringify({code:'"<|channel>thought"'})}}]})+'data: [DONE]\n\n');
     return stream(frame({reasoning_content:'second private thought'})+frame({content:'<|channel>thought\n<channel|>answer'})+'data: [DONE]\n\n');
   }} as unknown as Ai;
   const executed:string[]=[];
-  const adapter=new WorkersAIModel(ai,'@cf/google/gemma-4-26b-a4b-it',async code=>{executed.push(code);return {ok:true,value:'tool result'};});
+  const adapter=new WorkersAIModel(ai,'@cf/google/gemma-4-26b-a4b-it',async code=>{executed.push(code);return {ok:true,value:'tool result'};},true);
   const events=[];for await (const event of adapter.stream([],new AbortController().signal)) events.push(event);
   expect(events.filter(e=>'text' in e)).toEqual([{text:'answer'}]);
   expect(events.filter(e=>'thinking' in e && e.thinking.text).map(e=>(e as any).thinking)).toEqual([

@@ -37,7 +37,11 @@ export class NiaoAgent extends Agent<Env> {
     this.sql`CREATE INDEX IF NOT EXISTS niao_usage_day ON niao_usage_attempts(startedAt)`;
     this.sql`CREATE TABLE IF NOT EXISTS niao_usage_meta (id INTEGER PRIMARY KEY, trackingSince TEXT NOT NULL)`;
     this.sql`INSERT OR IGNORE INTO niao_usage_meta VALUES (1, ${new Date().toISOString()})`;
-    this.sql`CREATE TABLE IF NOT EXISTS niao_settings (id INTEGER PRIMARY KEY, modelId TEXT NOT NULL, epoch INTEGER NOT NULL DEFAULT 0)`;
+    this.sql`CREATE TABLE IF NOT EXISTS niao_settings (id INTEGER PRIMARY KEY, modelId TEXT NOT NULL, epoch INTEGER NOT NULL DEFAULT 0,
+      thinkingEnabled INTEGER NOT NULL DEFAULT 0 CHECK (thinkingEnabled IN (0,1)))`;
+    if (!this.sql<{name:string}>`PRAGMA table_info(niao_settings)`.some(column => column.name === "thinkingEnabled")) {
+      this.sql`ALTER TABLE niao_settings ADD COLUMN thinkingEnabled INTEGER NOT NULL DEFAULT 0 CHECK (thinkingEnabled IN (0,1))`;
+    }
     this.sql`INSERT OR IGNORE INTO niao_settings (id, modelId, epoch) VALUES (1, ${DEFAULT_MODEL}, 0)`;
     // A fresh isolate cannot resume an in-flight provider stream. Keep the user message;
     // require an explicit retry instead of silently charging for another generation.
@@ -59,7 +63,7 @@ export class NiaoAgent extends Agent<Env> {
     if (url.pathname.endsWith("/settings")) {
       if (request.method === "GET") return this.json(this.settingsResponse());
       if (request.method !== "PUT") return this.json({code: "method_not_allowed"}, 405);
-      let body: {modelId?: unknown};
+      let body: {modelId?: unknown; thinkingEnabled?: unknown};
       try {
         if (!request.headers.get("Content-Type")?.startsWith("application/json")) return this.json({code: "invalid_settings"}, 400);
         const text = await request.text();
@@ -67,7 +71,10 @@ export class NiaoAgent extends Agent<Env> {
         body = JSON.parse(text);
       } catch { return this.json({code: "invalid_settings"}, 400); }
       if (!body || !isModelID(body.modelId)) return this.json({code: "unsupported_model"}, 400);
-      this.sql`UPDATE niao_settings SET modelId = ${body.modelId} WHERE id = 1`;
+      if (body.thinkingEnabled !== undefined && typeof body.thinkingEnabled !== "boolean") return this.json({code: "invalid_settings"}, 400);
+      // Older clients may update only the model; preserve the saved option.
+      const thinkingEnabled = body.thinkingEnabled ?? this.settings().thinkingEnabled;
+      this.sql`UPDATE niao_settings SET modelId = ${body.modelId}, thinkingEnabled = ${thinkingEnabled ? 1 : 0} WHERE id = 1`;
       this.publish({type: "settings_updated", settings: this.settingsResponse()});
       return this.json(this.settingsResponse());
     }
@@ -124,12 +131,13 @@ export class NiaoAgent extends Agent<Env> {
       return rows.length ? {...message,thinking:rows.map(row => ({...row,active:false}))} : message;
     });
   }
-  private settings(): {modelId: ModelID; epoch: number} {
-    return this.sql<{modelId: ModelID; epoch: number}>`SELECT modelId, epoch FROM niao_settings WHERE id = 1`[0];
+  private settings(): {modelId: ModelID; epoch: number; thinkingEnabled: boolean} {
+    const row = this.sql<{modelId: ModelID; epoch: number; thinkingEnabled: number}>`SELECT modelId, epoch, thinkingEnabled FROM niao_settings WHERE id = 1`[0];
+    return {...row, thinkingEnabled: row.thinkingEnabled === 1};
   }
   private settingsResponse() { return {v: 1, ...this.settings(), models: MODELS}; }
   private json(data: object, status = 200) { return Response.json(data, {status, headers: {"Cache-Control": "no-store"}}); }
-  protected createModel(modelId: ModelID): ChatModel { return new WorkersAIModel(this.env.AI, modelId, rubyExecutor(this.env.RUBY_RUNNER)); }
+  protected createModel(modelId: ModelID, thinkingEnabled: boolean): ChatModel { return new WorkersAIModel(this.env.AI, modelId, rubyExecutor(this.env.RUBY_RUNNER), thinkingEnabled); }
 
   async onMessage(connection: Connection, raw: WSMessage) {
     let requestId: string | undefined;
@@ -173,7 +181,7 @@ export class NiaoAgent extends Agent<Env> {
   }
 
   private async generate(requestId: string) {
-    const modelId = this.settings().modelId; // Snapshot once: settings changes affect subsequent turns.
+    const {modelId, thinkingEnabled} = this.settings(); // Snapshot both for the whole turn, including tool continuations.
     const start = Date.now();
     let attemptId = crypto.randomUUID();
     this.sql`INSERT INTO niao_usage_attempts (id, startedAt) VALUES (${attemptId}, ${new Date(start).toISOString()})`;
@@ -203,7 +211,7 @@ export class NiaoAgent extends Agent<Env> {
       };
       let usage: Record<string, number> = {};
       const consume = async () => {
-        for await (const part of this.createModel(modelId).stream(boundedContext(recent), controller.signal)) {
+        for await (const part of this.createModel(modelId, thinkingEnabled).stream(boundedContext(recent), controller.signal)) {
           controller.signal.throwIfAborted();
           if ("text" in part) {
             text += part.text;

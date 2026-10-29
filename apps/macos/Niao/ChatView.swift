@@ -107,6 +107,7 @@ struct SettingsView: View {
     @State private var token = ""
     @State private var credentialBusy = false
     @State private var selectedModel = ""
+    @State private var thinkingEnabled = false
     @State private var error: String?
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -121,15 +122,20 @@ struct SettingsView: View {
                 .font(.caption).foregroundStyle(.secondary)
             Divider()
             if let settings = store.agentSettings {
-                Text("接続中の Agent のモデル").font(.headline)
+                Text("接続中の Agent のモデル設定").font(.headline)
                 Picker("モデル", selection: $selectedModel) {
                     ForEach(settings.models) { model in Text(model.name).tag(model.id) }
                 }
+                Toggle("Thinkingを有効にする", isOn: $thinkingEnabled)
+                    .disabled(settings.models.first(where: { $0.id == selectedModel })?.supportsThinking != true)
+                Text("Gemma 4で利用できます。ONにすると応答時間や消費量が増える場合があります。")
+                    .font(.caption).foregroundStyle(.secondary)
                 HStack {
                     Text("変更後の推論から適用されます。").font(.caption).foregroundStyle(.secondary)
                     Spacer()
-                    Button("モデルを変更") { store.updateModel(selectedModel) }
-                        .disabled(!store.connected || store.controlBusy || selectedModel == settings.modelId || selectedModel.isEmpty)
+                    Button("モデル設定を保存") { store.updateModelSettings(selectedModel, thinkingEnabled: thinkingEnabled) }
+                        .disabled(!store.connected || store.controlBusy || selectedModel.isEmpty ||
+                                  (selectedModel == settings.modelId && thinkingEnabled == settings.thinkingEnabled))
                 }
             }
             if let error = error ?? store.error { Text(error).font(.caption).foregroundStyle(.red) }
@@ -148,10 +154,12 @@ struct SettingsView: View {
         }.padding(24).frame(width: 480)
         .onAppear {
             selectedModel = store.agentSettings?.modelId ?? ""
+            thinkingEnabled = store.agentSettings?.thinkingEnabled ?? false
             url = store.backendURL
         }
         .task { await loadToken() }
         .onChange(of: store.agentSettings?.modelId) { _, value in selectedModel = value ?? "" }
+        .onChange(of: store.agentSettings?.thinkingEnabled) { _, value in thinkingEnabled = value ?? false }
         .onChange(of: url) { _, value in
             guard value != store.backendURL else { return }
             // Reading a saved credential is explicit; don't prompt on every keystroke.

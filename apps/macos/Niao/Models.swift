@@ -154,10 +154,25 @@ struct UsageSnapshot: Decodable {
 }
 
 struct AgentSettings: Decodable {
-    struct Model: Decodable, Identifiable { let id: String; let name: String }
+    struct Model: Decodable, Identifiable {
+        let id: String
+        let name: String
+        let supportsThinking: Bool?
+    }
     let v: Int
     let modelId: String
+    let thinkingEnabled: Bool
     let epoch: Int
     let models: [Model]
+    private enum CodingKeys: String, CodingKey { case v, modelId, thinkingEnabled, epoch, models }
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        v = try values.decode(Int.self, forKey: .v)
+        modelId = try values.decode(String.self, forKey: .modelId)
+        thinkingEnabled = try values.decodeIfPresent(Bool.self, forKey: .thinkingEnabled) ?? false
+        epoch = try values.decode(Int.self, forKey: .epoch)
+        models = try values.decode([Model].self, forKey: .models)
+    }
 }
+struct ModelSettingsUpdate: Encodable { let modelId: String; let thinkingEnabled: Bool }
 struct ClearHistoryResult: Decodable { let v: Int; let epoch: Int }

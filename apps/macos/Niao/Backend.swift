@@ -58,8 +58,8 @@ final class Backend {
         }
         return try JSONDecoder().decode(T.self, from: data)
     }
-    func updateModel(_ modelId: String) async throws -> AgentSettings {
-        let body = try JSONEncoder().encode(["modelId": modelId])
+    func updateModelSettings(_ modelId: String, thinkingEnabled: Bool) async throws -> AgentSettings {
+        let body = try JSONEncoder().encode(ModelSettingsUpdate(modelId: modelId, thinkingEnabled: thinkingEnabled))
         return try await controlRequest(path: "/agents/niao-agent/personal/settings", method: "PUT", body: body)
     }
     func clearHistory(epoch: Int) async throws -> ClearHistoryResult {

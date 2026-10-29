@@ -2,13 +2,16 @@ import { modelOutputAdapter, type ModelOutput } from "./model-output";
 import { rubyTool, type RubyExecutor } from "./ruby/tool";
 import { ChatError } from "./protocol";
 export const MODELS = [
-  {id: "@cf/google/gemma-4-26b-a4b-it", name: "Gemma 4 · 26B A4B"},
-  {id: "@cf/zai-org/glm-4.7-flash", name: "GLM 4.7 Flash"},
+  {id: "@cf/google/gemma-4-26b-a4b-it", name: "Gemma 4 · 26B A4B", supportsThinking: true},
+  {id: "@cf/zai-org/glm-4.7-flash", name: "GLM 4.7 Flash", supportsThinking: false},
 ] as const;
 export type ModelID = typeof MODELS[number]["id"];
 export const DEFAULT_MODEL: ModelID = MODELS[0].id;
 export function isModelID(value: unknown): value is ModelID {
   return MODELS.some(model => model.id === value);
+}
+export function supportsThinking(modelId: ModelID): boolean {
+  return MODELS.find(model => model.id === modelId)?.supportsThinking ?? false;
 }
 export type ModelMessage = { role: "system" | "user" | "assistant"; content: string };
 export type ToolCall = {id: string; type: "function"; function: {name: string; arguments: string}};
@@ -19,7 +22,7 @@ export interface ChatModel {
 
 // The only module aware of Workers AI's provider-specific input and SSE format.
 export class WorkersAIModel implements ChatModel {
-  constructor(private ai: Ai, private modelId: ModelID, private executeRuby?: RubyExecutor) { }
+  constructor(private ai: Ai, private modelId: ModelID, private executeRuby?: RubyExecutor, private thinkingEnabled = false) { }
   async *stream(messages: ModelMessage[], signal: AbortSignal): AsyncIterable<ModelEvent> {
     const conversation: any[] = [...messages];
     let executions = 0;
@@ -29,7 +32,7 @@ export class WorkersAIModel implements ChatModel {
       const started = Date.now();
       const result = await this.ai.run(this.modelId, {
         messages: conversation, stream: true, max_completion_tokens: 2048,
-        chat_template_kwargs: { enable_thinking: false },
+        chat_template_kwargs: { enable_thinking: this.thinkingEnabled && supportsThinking(this.modelId) },
         stream_options: { include_usage: true },
         ...(this.executeRuby ? {tools:[rubyTool], parallel_tool_calls:false, tool_choice:round === 3 ? "none" : "auto"} : {}),
       }, { signal });

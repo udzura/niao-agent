@@ -2,7 +2,7 @@
 
 すべて既存の `NIAO_TOKEN` による Bearer 認証が必要です。追加のCloudflareシークレットは不要です。以下は `NIAO_BACKEND_URL` と `NIAO_TOKEN` を環境変数に設定済みの例です。
 
-## モデルを取得・変更する
+## モデルとthinking設定を取得・変更する
 
 ```sh
 curl --fail-with-body -H "Authorization: Bearer $NIAO_TOKEN" \
@@ -11,16 +11,20 @@ curl --fail-with-body -H "Authorization: Bearer $NIAO_TOKEN" \
 curl --fail-with-body -X PUT \
   -H "Authorization: Bearer $NIAO_TOKEN" \
   -H 'Content-Type: application/json' \
-  --data '{"modelId":"@cf/zai-org/glm-4.7-flash"}' \
+  --data '{"modelId":"@cf/google/gemma-4-26b-a4b-it","thinkingEnabled":true}' \
   "$NIAO_BACKEND_URL/agents/niao-agent/personal/settings"
 ```
 
-レスポンスには `modelId`（現在の選択）、`models`（選択可能なIDと表示名）、`epoch`（会話の世代）、`v: 1` が含まれます。現在の候補は以下の2つです。
+レスポンスには `modelId`（現在の選択）、`thinkingEnabled`（ON/OFF）、`models`（選択可能なID・表示名・`supportsThinking`）、`epoch`（会話の世代）、`v: 1` が含まれます。現在の候補は以下の2つです。
 
 - `@cf/google/gemma-4-26b-a4b-it`（既定）
 - `@cf/zai-org/glm-4.7-flash`
 
-設定はSQLiteに永続化され、次に開始する推論から適用されます。生成中の応答は開始時のモデルを使い続けます。失敗した応答を再試行する際は新しい設定を使用します。完了済み送信の再送には保存済みの応答を返します。
+モデルとthinking設定はSQLiteに永続化され、次の会話ターンから適用されます。生成中の応答は、ツール実行後の続きも含めて開始時の設定を使い続けます。失敗した応答を再試行する際は新しい設定を使用します。完了済み送信の再送には保存済みの応答を返します。
+
+`thinkingEnabled` はJSONの真偽値で指定します。`false` でOFFにでき、省略すると現在の保存値を維持します（モデルだけ変更する既存クライアントとの互換性）。初回・既存DBの移行時の既定は `false` です。現在はGemma 4にのみ適用します。GLM 4.7 Flashでは保存値にかかわらず従来通りthinkingを無効にし、Gemmaへ戻した際は保存値を再利用します。モデルごとの複数設定ではなく、選択中のモデルと一緒に保持する1つのオプションです。
+
+thinkingのON/OFFは生成要求の設定で、OFFでもモデルがthinkingを返す場合は分離して表示します。ONでは生成時間や消費量が増える場合があります。[Googleのthinking説明](https://ai.google.dev/gemma/docs/capabilities/thinking)も参照してください。出力上限は従来の2,048トークンで、thinkingを有効にしても自動では増やしません。思考だけで終わって回答が得られない場合はエラーになります。
 
 許可していないモデルは400で拒否します。追加候補はWorkerの `src/model.ts` の `MODELS` で管理しますが、追加前に入出力とストリーミング形式の互換性を確認してください。選択されたモデルの実行が失敗しても別モデルへ暗黙に切り替えません。
 

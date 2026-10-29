@@ -61,7 +61,7 @@ describe("authenticated Worker boundary", () => {
 describe("model settings and conversation cleanup", () => {
   const gemma = "@cf/google/gemma-4-26b-a4b-it";
   const glm = "@cf/zai-org/glm-4.7-flash";
-  const put = (modelId: string) => SELF.fetch(`${base}/settings`, {method: "PUT", headers: {...headers, "Content-Type": "application/json"}, body: JSON.stringify({modelId})});
+  const put = (modelId: string, thinkingEnabled?: unknown) => SELF.fetch(`${base}/settings`, {method: "PUT", headers: {...headers, "Content-Type": "application/json"}, body: JSON.stringify({modelId, thinkingEnabled})});
   const clear = (epoch: number) => SELF.fetch(`${base}/history`, {method: "DELETE", headers: {...headers, "If-Match": `"${epoch}"`}});
   it("authenticates mutations and rejects unsupported or malformed settings", async () => {
     expect((await SELF.fetch(`${base}/settings`, {method: "PUT", body: "{}"})).status).toBe(401);
@@ -83,6 +83,56 @@ describe("model settings and conversation cleanup", () => {
     });
     const client = await connect(); send(client.ws, crypto.randomUUID());
     expect((await client.until(e => e.type === "committed")).messages[1].content).toBe(glm);
+  });
+  it("validates thinking atomically and preserves it for model-only updates", async () => {
+    const get = async () => (await SELF.fetch(`${base}/settings`, {headers})).json<any>();
+    const initial = await get();
+    expect(initial.thinkingEnabled).toBe(false);
+    expect(initial.models.map((model:any) => model.supportsThinking)).toEqual([true,false]);
+    for (const value of [null, "true", 1, {}, []]) {
+      const response = await put(glm,value);
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({code:"invalid_settings"});
+    }
+    expect(await get()).toEqual(initial);
+    expect((await (await put(gemma,true)).json<any>()).thinkingEnabled).toBe(true);
+    expect(await (await put(glm)).json()).toMatchObject({modelId:glm,thinkingEnabled:true});
+    expect(await (await put(gemma)).json()).toMatchObject({modelId:gemma,thinkingEnabled:true});
+    expect(await (await put(gemma,false)).json()).toMatchObject({modelId:gemma,thinkingEnabled:false});
+  });
+  it("migrates existing model settings without clearing history and restores thinking after eviction", async () => {
+    await runInDurableObject(await stub(), (agent:NiaoAgent) => {
+      agent.sql`DROP TABLE niao_settings`;
+      agent.sql`CREATE TABLE niao_settings (id INTEGER PRIMARY KEY, modelId TEXT NOT NULL, epoch INTEGER NOT NULL DEFAULT 0)`;
+      agent.sql`INSERT INTO niao_settings VALUES (1,'@cf/zai-org/glm-4.7-flash',3)`;
+      agent.sql`INSERT INTO niao_messages (id,requestId,role,content,createdAt) VALUES ('legacy','legacy','user','saved history','now')`;
+    });
+    await evictDurableObject(await stub());
+    const migrated = await history();
+    expect(migrated.settings).toMatchObject({modelId:glm,epoch:3,thinkingEnabled:false});
+    expect(migrated.messages[0].content).toBe('saved history');
+    await (await put(gemma,true)).text();
+    await evictDurableObject(await stub());
+    const restored = await history();
+    expect(restored.settings).toMatchObject({modelId:gemma,epoch:3,thinkingEnabled:true});
+    expect(restored.messages).toEqual(migrated.messages);
+  });
+  it("broadcasts thinking changes, snapshots the running turn, and preserves the option on cleanup", async () => {
+    await runInDurableObject(await stub(), (agent:NiaoAgent) => {
+      (agent as any).createModel = (_modelId:string, thinkingEnabled:boolean) => ({async *stream() {
+        yield {text:thinkingEnabled ? 'thinking on' : 'thinking off'};
+        await new Promise(resolve => setTimeout(resolve,150));
+      }});
+    });
+    const client = await connect(); const first = crypto.randomUUID(); send(client.ws,first);
+    await client.until(e => e.type === 'partial');
+    expect((await put(gemma,true)).status).toBe(200);
+    expect((await client.until(e => e.type === 'settings_updated')).settings.thinkingEnabled).toBe(true);
+    expect((await client.until(e => e.type === 'committed' && e.requestId === first)).messages[1].content).toBe('thinking off');
+    const next = crypto.randomUUID(); send(client.ws,next);
+    expect((await client.until(e => e.type === 'committed' && e.requestId === next)).messages[1].content).toBe('thinking on');
+    const cleared = await clear(0); expect(cleared.status).toBe(200); await cleared.text();
+    expect((await history()).settings.thinkingEnabled).toBe(true);
   });
   it("changes only the next inference and refuses cleanup while generating", async () => {
     await runInDurableObject(await stub(), (agent: NiaoAgent) => {
