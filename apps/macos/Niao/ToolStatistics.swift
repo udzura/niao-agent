@@ -39,26 +39,31 @@ struct ToolStatistics: Codable {
         sessions.append(session)
         return session.id
     }
+    @discardableResult
     mutating func observe(sessionID: UUID, backend: String, epoch: Int, requestID: String,
-                          name: String, status: String, at date: Date = Date()) {
+                          name: String, status: String, at date: Date = Date()) -> Bool {
         guard !name.isEmpty, name.utf8.count <= 128, ["running", "completed"].contains(status),
-              let index = sessions.firstIndex(where: { $0.id == sessionID }) else { return }
+              let index = sessions.firstIndex(where: { $0.id == sessionID }) else { return false }
         let key = identity(backend, epoch, requestID, name)
+        var newCall = false
         if status == "running" {
-            guard pending[key] == nil else { return }
+            guard pending[key] == nil else { return false }
             completedKeys.remove(key)
             pending[key] = sessionID
             sessions[index].tools[name, default: ToolCounts()].calls += 1
+            newCall = true
         } else {
-            guard !completedKeys.contains(key) else { return }
+            guard !completedKeys.contains(key) else { return false }
             completedKeys.insert(key)
             // Completion alone still proves a call happened, even if start was missed.
             if pending.removeValue(forKey: key) == nil {
                 sessions[index].tools[name, default: ToolCounts()].calls += 1
+                newCall = true
             }
             sessions[index].tools[name, default: ToolCounts()].completed += 1
         }
         sessions[index].lastObservedAt = date
+        return newCall
     }
     mutating func finishTurn(backend: String, epoch: Int, requestID: String) {
         let prefix = turnIdentity(backend, epoch, requestID) + "|"

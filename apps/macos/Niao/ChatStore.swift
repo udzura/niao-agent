@@ -4,6 +4,7 @@ import Foundation
 
 @MainActor
 final class ChatStore: ObservableObject {
+    @Published var toolToast = ToolCallToastState()
     @Published var toolStatistics = ToolStatistics()
     @Published var toolStatisticsError: String?
     private(set) var toolSessionID = UUID()
@@ -76,6 +77,7 @@ final class ChatStore: ObservableObject {
         UserDefaults.standard.set(valid, forKey: "backendURL")
         messages = []; cursor = 0; turns = []; partial = nil
         historyEpoch = nil; agentSettings = nil
+        toolToast.clear()
         usage = nil; usageError = nil; usageRefreshAt = nil
         reconnect()
     }
@@ -195,8 +197,9 @@ final class ChatStore: ObservableObject {
         case "tool_status":
             toolRunning = event.status == "running"
             if let requestID = event.requestId, let name = event.name, let status = event.status {
-                toolStatistics.observe(sessionID: toolSessionID, backend: backendURL, epoch: event.epoch ?? 0,
+                let newCall = toolStatistics.observe(sessionID: toolSessionID, backend: backendURL, epoch: event.epoch ?? 0,
                                        requestID: requestID, name: name, status: status)
+                if newCall { toolToast.show(name: name) }
                 saveToolStatistics()
             }
         case "history_cleared": break // acceptEpoch already reset the local conversation.
@@ -249,6 +252,7 @@ final class ChatStore: ObservableObject {
         if let current = historyEpoch, incoming < current { return false }
         if let current = historyEpoch, incoming > current {
             messages = []; turns = []; partial = nil; cursor = 0; draft = ""
+            toolToast.clear()
         }
         historyEpoch = incoming
         if let pending = outbox, (pending.epoch ?? 0) != incoming { clearOutbox() }

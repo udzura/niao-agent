@@ -49,6 +49,7 @@ struct ChatView: View {
                 .onChange(of: store.messages.count) { _, _ in proxy.scrollTo("bottom", anchor: .bottom) }
                 .onChange(of: store.partial?.text) { _, _ in proxy.scrollTo("bottom", anchor: .bottom) }
             }
+            .overlay(alignment: .bottomTrailing) { ToolCallToastOverlay(store: store) }
             if let pending = store.outbox {
                 HStack {
                     Text("送信確認待ち: \(pending.content)").font(.caption).lineLimit(2)
