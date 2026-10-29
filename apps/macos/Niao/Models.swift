@@ -28,6 +28,7 @@ struct HistoryPage: Decodable {
     let active: PartialMessage?
 }
 struct ServerEvent: Decodable {
+    let name: String?
     let status: String?
     let epoch: Int?
     let settings: AgentSettings?

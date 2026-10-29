@@ -4,6 +4,11 @@ import Foundation
 
 @MainActor
 final class ChatStore: ObservableObject {
+    @Published var toolStatistics = ToolStatistics()
+    @Published var toolStatisticsError: String?
+    private(set) var toolSessionID = UUID()
+    private var toolStatisticsURL: URL?
+    private var statisticsWritable = true
     @Published var agentSettings: AgentSettings?
     @Published var controlBusy = false
     @Published var toolRunning = false
@@ -38,11 +43,19 @@ final class ChatStore: ObservableObject {
         outboxURL = folder.appendingPathComponent("outbox.json")
         do {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            toolStatisticsURL = folder.appendingPathComponent("tool-statistics.json")
+            do { toolStatistics = try ToolStatistics.load(from: toolStatisticsURL!) }
+            catch {
+                statisticsWritable = false
+                toolStatisticsError = "統計ファイルを読み込めませんでした。既存ファイルを保護するため保存を停止しています。"
+            }
             if let data = try? Data(contentsOf: outboxURL) {
                 let stored = try JSONDecoder().decode(StoredSubmission.self, from: data)
                 if stored.backend == backendURL { outbox = stored.submission }
             }
         } catch { self.error = "未送信メッセージの復元に失敗しました。\(error.localizedDescription)" }
+        toolSessionID = toolStatistics.beginSession()
+        saveToolStatistics()
         NotificationCenter.default.addObserver(self, selector: #selector(wake), name: NSApplication.didBecomeActiveNotification, object: nil)
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(wake), name: NSWorkspace.didWakeNotification, object: nil)
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(sleep), name: NSWorkspace.willSleepNotification, object: nil)
@@ -179,7 +192,13 @@ final class ChatStore: ObservableObject {
         guard acceptEpoch(event.epoch ?? 0) else { return }
         eventRevision += 1
         switch event.type {
-        case "tool_status": toolRunning = event.status == "running"
+        case "tool_status":
+            toolRunning = event.status == "running"
+            if let requestID = event.requestId, let name = event.name, let status = event.status {
+                toolStatistics.observe(sessionID: toolSessionID, backend: backendURL, epoch: event.epoch ?? 0,
+                                       requestID: requestID, name: name, status: status)
+                saveToolStatistics()
+            }
         case "history_cleared": break // acceptEpoch already reset the local conversation.
         case "settings_updated": agentSettings = event.settings
         case "accepted":
@@ -193,6 +212,7 @@ final class ChatStore: ObservableObject {
             if let requestID = event.requestId { partial = PartialMessage(requestId: requestID, text: event.text ?? "") }
         case "committed":
             toolRunning = false
+            finishToolTurn(event)
             messages = mergeMessages(messages, event.messages ?? [])
             turns.removeAll { $0.requestId == event.requestId }
             if partial?.requestId == event.requestId { partial = nil }
@@ -200,6 +220,7 @@ final class ChatStore: ObservableObject {
             refreshUsage()
         case "error":
             toolRunning = false
+            finishToolTurn(event)
             refreshUsage()
             error = explanation(event.code ?? "unknown")
             if let requestID = event.requestId {
@@ -211,6 +232,16 @@ final class ChatStore: ObservableObject {
             }
         default: break
         }
+    }
+    private func finishToolTurn(_ event: ServerEvent) {
+        if let requestID = event.requestId {
+            toolStatistics.finishTurn(backend: backendURL, epoch: event.epoch ?? 0, requestID: requestID)
+        }
+    }
+    private func saveToolStatistics() {
+        guard statisticsWritable, let url = toolStatisticsURL else { return }
+        do { try toolStatistics.save(to: url); toolStatisticsError = nil }
+        catch { toolStatisticsError = "統計の保存に失敗しました。表示中の値はメモリ上の記録です。" }
     }
     // Epochs fence old HTTP replies, buffered socket events and persisted offline sends.
     @discardableResult

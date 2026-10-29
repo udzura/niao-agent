@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ChatView: View {
     @ObservedObject var store: ChatStore
+    @Environment(\.openWindow) private var openWindow
     @State private var confirmClear = false
     @FocusState private var inputFocused: Bool
     var body: some View {
@@ -11,6 +12,8 @@ struct ChatView: View {
                 Text(store.connection).font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 if !store.connected { Button("再接続") { store.reconnect() } }
+                Button { openWindow(id: "tool-statistics") } label: { Image(systemName: "chart.bar") }
+                    .help("ツール統計")
                 Button { confirmClear = true } label: { Image(systemName: "trash") }
                     .disabled(!store.connected || store.busy || store.controlBusy).help("チャット履歴を削除")
                 Button { store.settingsPresented = true } label: { Image(systemName: "gearshape") }.help("設定")

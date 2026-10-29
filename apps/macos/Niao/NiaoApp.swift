@@ -17,6 +17,9 @@ struct NiaoApp: App {
                     .keyboardShortcut(",", modifiers: .command)
             }
         }
+        Window("ツール統計", id: "tool-statistics") {
+            ToolStatisticsView(store: store)
+        }.defaultSize(width: 600, height: 580)
         MenuBarExtra("Niao", systemImage: "bird") {
             MenuContent(store: store)
         }
@@ -29,6 +32,7 @@ struct MenuContent: View {
         Text(store.connection)
         Button("Niao を開く") { show() }
         Button("設定…") { show(); store.settingsPresented = true }
+        Button("ツール統計…") { openWindow(id: "tool-statistics"); NSApplication.shared.activate(ignoringOtherApps: true) }
         Divider()
         Button("Niao を終了") { NSApplication.shared.terminate(nil) }.keyboardShortcut("q")
     }
