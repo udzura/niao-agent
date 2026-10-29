@@ -6,6 +6,7 @@ import { ChatError, errorCode, parseSubmission, type Message, type Turn, type Th
 import { ClefThinkingJudge, isThinkingMode, thinkingPolicy, JUDGE_MODEL, type ThinkingMode, type ThinkingPolicy, type ThinkingJudge } from "./thinking-policy";
 
 import { UsageAnalytics, utcDay, validNeurons } from "./usage";
+import { withPastLogsTools, type AdditionalTool } from "./past-logs";
 
 type Active = { requestId: string; text: string; thinking?: ThinkingSegment[] };
 const log = (event: string, fields: Record<string, unknown> = {}) => console.log(JSON.stringify({event, ...fields}));
@@ -166,7 +167,9 @@ export class NiaoAgent extends Agent<Env> {
   }
   private settingsResponse() { const settings = this.settings(); return {v:1,...settings,thinkingEnabled:settings.thinkingMode === "on",models:MODELS}; }
   private json(data: object, status = 200) { return Response.json(data, {status, headers: {"Cache-Control": "no-store"}}); }
-  protected createModel(modelId: ModelID, thinkingEnabled: boolean): ChatModel { return new WorkersAIModel(this.env.AI, modelId, rubyExecutor(this.env.RUBY_RUNNER), thinkingEnabled); }
+  protected createModel(modelId: ModelID, thinkingEnabled: boolean, tools: AdditionalTool[] = []): ChatModel {
+    return new WorkersAIModel(this.env.AI, modelId, rubyExecutor(this.env.RUBY_RUNNER), thinkingEnabled, tools);
+  }
   protected createThinkingJudge(): ThinkingJudge { return new ClefThinkingJudge(this.env.AI); }
 
   async onMessage(connection: Connection, raw: WSMessage) {
@@ -244,7 +247,7 @@ export class NiaoAgent extends Agent<Env> {
         this.publish({type:"partial",...this.active});
       };
       let usage: Record<string, number> = {};
-      const consume = async () => {
+      const consume = async (tools: AdditionalTool[]) => {
         let thinkingEnabled = thinkingMode === "on";
         if (thinkingMode === "auto" && supportsThinking(modelId)) {
           const id = this.ctx.storage.transactionSync(() => {
@@ -265,7 +268,7 @@ export class NiaoAgent extends Agent<Env> {
         }
         controller.signal.throwIfAborted();
         attemptId = startAttempt();
-        for await (const part of this.createModel(modelId, thinkingEnabled).stream(boundedContext(recent), controller.signal)) {
+        for await (const part of this.createModel(modelId, thinkingEnabled, tools).stream(boundedContext(recent), controller.signal)) {
           controller.signal.throwIfAborted();
           if ("text" in part) {
             text += part.text;
@@ -284,8 +287,9 @@ export class NiaoAgent extends Agent<Env> {
             attemptId = startAttempt();
             usage = {};
           } else if ("toolStatus" in part) {
-            this.publish({type:"tool_status",requestId,name:"ruby_eval",status:part.toolStatus});
-            log("tool.execution", {requestId,name:"ruby_eval",status:part.toolStatus});
+            const name = part.name ?? "ruby_eval";
+            this.publish({type:"tool_status",requestId,name,status:part.toolStatus});
+            log("tool.execution", {requestId,name,status:part.toolStatus});
           } else if ("usage" in part) {
             usage = {...usage, ...part.usage};
             if (validNeurons(part.usage.neurons)) {
@@ -296,7 +300,7 @@ export class NiaoAgent extends Agent<Env> {
           }
         }
       };
-      await Promise.race([consume(), timeout]);
+      await Promise.race([withPastLogsTools(this.mcp, this.env, controller.signal, consume), timeout]);
       if (!text.trim()) throw new ChatError("empty_ai_response");
       this.ctx.storage.transactionSync(() => {
         this.sql`INSERT INTO niao_messages (id, requestId, role, content, createdAt)

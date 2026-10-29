@@ -1,0 +1,28 @@
+{
+  "name": "@niao/past-logs",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --ip 127.0.0.1 --port 8788",
+    "build": "wrangler deploy --dry-run --outdir build",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "db:migrate": "wrangler d1 migrations apply DB --local",
+    "import:sample": "node scripts/import-samples.mjs",
+    "test:dev": "node scripts/smoke.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.3.1",
+    "agents": "0.31.0",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.4.8",
+    "@cloudflare/workers-types": "latest",
+    "@modelcontextprotocol/client": "2.3.1",
+    "typescript": "latest",
+    "vitest": "~4.1.0",
+    "wrangler": "4.153.0"
+  }
+}

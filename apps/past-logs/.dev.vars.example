@@ -1,0 +1,3 @@
+# Generate two DIFFERENT secrets, at least 32 characters each.
+PAST_LOGS_ADMIN_TOKEN=""
+PAST_LOGS_READ_TOKEN=""

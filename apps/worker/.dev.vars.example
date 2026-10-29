@@ -5,3 +5,7 @@ NIAO_TOKEN=
 # Permission: Account > Account Analytics > Read
 CF_ACCOUNT_ID=
 CF_ANALYTICS_TOKEN=
+
+# Optional Past Logs MCP (read-only token from apps/past-logs/.dev.vars).
+PAST_LOGS_MCP_URL=http://127.0.0.1:8788/mcp
+PAST_LOGS_MCP_TOKEN=

@@ -1,0 +1,30 @@
+[
+  {
+    "source": "cosense",
+    "source_id": "sample-project/page-d1-japanese",
+    "url": "https://example.com/cosense/d1-japanese",
+    "title": "Cloudflare D1で日本語全文検索を試したメモ",
+    "body": "# 日本語の技術メモ\n\nCloudflare WorkersからD1を使う。標準のSQLite unicode61は日本語の文章を単語に分割しない。文字bigramなら「検索」のような二文字の語を索引化できる。英語のCloudflareやWorkersも一緒に検索したい。\n\nこれはテスト用の架空の記事です。",
+    "created_at": "2024-03-12T10:00:00+09:00",
+    "updated_at": "2024-03-13T12:30:00+09:00",
+    "metadata": {"sample": true, "project": "sample-project", "tags": ["D1", "検索"]}
+  },
+  {
+    "source": "hatena",
+    "source_id": "sample-blog/entry/2024/04/02/ruby-wasm",
+    "url": "https://example.com/hatena/ruby-wasm",
+    "title": "Running Ruby in WebAssembly on Cloudflare Workers",
+    "body": "# Ruby and Wasm\n\nA fresh Ruby VM for every invocation avoids global state leaking between executions. Keep the immutable WebAssembly module compiled, but create new mutable memory. Separate instruction budgets from output and memory limits.\n\nRubyをWebAssemblyで実行した技術メモ。これはテスト用の架空の記事です。",
+    "created_at": "2024-04-02T08:00:00Z",
+    "metadata": {"sample": true, "tags": ["Ruby", "WebAssembly"]}
+  },
+  {
+    "source": "manual",
+    "source_id": "sample-diary-2024-05-01",
+    "url": "https://example.com/diary/2024-05-01",
+    "title": "開発日記：散歩と検索機能",
+    "body": "今日は散歩のあとに日本語検索の仕組みを考えた。小さい道具を組み合わせて動くところまで作ると楽しい。これはテスト用の架空の日記です。",
+    "created_at": "2024-05-01T21:00:00+09:00",
+    "metadata": {"sample": true}
+  }
+]

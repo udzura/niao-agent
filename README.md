@@ -10,6 +10,7 @@ macOS に住むパーソナル AI コンパニオンの Phase 1。SwiftUI のネ
 - Gemma 4のthinkingは回答と分離し、「思考過程」から開閉できます。再起動後も確認できます
 - チャット履歴の削除（モデル設定・使用量は保持）。ニュース収集、定期実行、長期記憶は含みません
 - 制限付きPicoRubyツールで計算・文字列処理（外部I/Oなし）
+- Past Logs: 記事・日記のD1保存、日本語/英語検索、読み取り専用MCPをNiaoのツールとして利用（[設定・取り込み・デプロイ](docs/past-logs.md)）
 
 ## 構成
 
@@ -26,6 +27,13 @@ apps/
   ruby-runner/              # 固定Worker / Service Binding RPC / PicoRuby Wasm
     src/generated/          # 同梱済みJS・Wasm
     wrangler.jsonc
+  past-logs/                # 独立Worker / REST管理 / read-only MCP / 日本語FTS5
+    src/{index,mcp,documents,search,validation}.ts
+    migrations/
+    samples/
+    scripts/
+    test/
+    wrangler.jsonc
   worker/
     src/{index,auth,niao-agent,model,model-output,protocol}.ts
     test/
@@ -34,6 +42,7 @@ apps/
     .dev.vars.example
     package.json
 docs/
+  past-logs.md
   architecture.md
   protocol.md
   pondro-feedback.md

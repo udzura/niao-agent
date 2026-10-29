@@ -8,6 +8,8 @@ export interface Env {
   NIAO_TOKEN: string;
   CF_ACCOUNT_ID?: string;
   CF_ANALYTICS_TOKEN?: string;
+  PAST_LOGS_MCP_URL?: string;
+  PAST_LOGS_MCP_TOKEN?: string;
 }
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {

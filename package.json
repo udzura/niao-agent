@@ -3,18 +3,21 @@
   "private": true,
   "workspaces": [
     "apps/worker",
-    "apps/ruby-runner"
+    "apps/ruby-runner",
+    "apps/past-logs"
   ],
   "scripts": {
     "dev": "npm run dev -w apps/worker",
-    "test": "npm run test -w apps/worker",
+    "test": "npm run test -w apps/past-logs && npm run test -w apps/worker",
     "test:macos": "swift test --package-path apps/macos",
     "typecheck": "npm run typecheck --workspaces",
     "build:worker": "npm run build -w apps/worker",
     "build:macos": "bash apps/macos/scripts/build.sh",
     "build:ruby": "bash tools/ruby-sandbox/build.sh",
     "build:runner": "npm run build -w apps/ruby-runner",
-    "bench:ruby": "node tools/ruby-sandbox/bench.mjs"
+    "bench:ruby": "node tools/ruby-sandbox/bench.mjs",
+    "dev:past-logs": "npm run dev -w apps/past-logs",
+    "build:past-logs": "npm run build -w apps/past-logs"
   },
   "devDependencies": {
     "esbuild": "0.28.1"
