@@ -11,6 +11,7 @@ macOS に住むパーソナル AI コンパニオンの Phase 1。SwiftUI のネ
 - チャット履歴の削除（モデル設定・使用量は保持）。ニュース収集、定期実行、長期記憶は含みません
 - 制限付きPicoRubyツールで計算・文字列処理（外部I/Oなし）
 - Past Logs: 記事・日記のD1保存、日本語/英語キーワード検索・意味検索、読み取り専用MCPをNiaoのツールとして利用（[設定・取り込み・デプロイ](docs/past-logs.md)）
+- [Cosense記事の一括インポート](docs/cosense-import.md)（公開ページの一覧・dry-run・途中再開に対応）
 
 ## 構成
 
@@ -44,6 +45,7 @@ apps/
 docs/
   past-logs.md
   past-logs-semantic.md
+  cosense-import.md
   architecture.md
   protocol.md
   pondro-feedback.md
