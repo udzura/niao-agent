@@ -1,3 +1,4 @@
+import { modelOutputAdapter, type ModelOutput } from "./model-output";
 import { rubyTool, type RubyExecutor } from "./ruby/tool";
 import { ChatError } from "./protocol";
 export const MODELS = [
@@ -11,7 +12,7 @@ export function isModelID(value: unknown): value is ModelID {
 }
 export type ModelMessage = { role: "system" | "user" | "assistant"; content: string };
 export type ToolCall = {id: string; type: "function"; function: {name: string; arguments: string}};
-export type ModelEvent = { text: string } | { usage: Record<string, number> } | { toolDelta: any[] } | { inferenceStarted: true } | { toolStatus: "running" | "completed" };
+export type ModelEvent = { thinking: {generation:number; text:string; active:boolean} } | { text: string } | { usage: Record<string, number> } | { toolDelta: any[] } | { inferenceStarted: true } | { toolStatus: "running" | "completed" };
 export interface ChatModel {
   stream(messages: ModelMessage[], signal: AbortSignal): AsyncIterable<ModelEvent>;
 }
@@ -35,6 +36,18 @@ export class WorkersAIModel implements ChatModel {
       if (!(result instanceof ReadableStream)) throw new ChatError("invalid_ai_response");
       const calls = new Map<number, ToolCall>();
       let content = "";
+      const adapter = modelOutputAdapter(this.modelId);
+      const reasoningAdapter = modelOutputAdapter(this.modelId);
+      let thinkingActive = false, sawThinking = false;
+      const normalize = function*(output: ModelOutput): Generator<ModelEvent> {
+        if (output.content && output.thinkingActive === undefined && thinkingActive) output = {...output,thinkingActive:false};
+        if (output.thinkingActive !== undefined) thinkingActive = output.thinkingActive;
+        if (output.thinking || output.thinkingActive !== undefined) {
+          sawThinking = true;
+          yield {thinking:{generation:round,text:output.thinking ?? "",active:thinkingActive}};
+        }
+        if (output.content) { content += output.content; yield {text:output.content}; }
+      };
       for await (const event of parseSSE(result, signal)) {
         if ("toolDelta" in event) {
           for (const delta of event.toolDelta) {
@@ -53,10 +66,21 @@ export class WorkersAIModel implements ChatModel {
             calls.set(delta.index,call);
           }
         } else {
-          if ("text" in event) content += event.text;
-          yield event;
+          if ("text" in event) yield* normalize(adapter.transform(event.text));
+          else if ("reasoning" in event) {
+            if (this.modelId.startsWith('@cf/google/gemma-4-')) {
+              const output = reasoningAdapter.transform(event.reasoning);
+              yield* normalize({thinking:(output.thinking ?? "") + (output.content ?? ""),thinkingActive:true});
+            }
+          } else yield event;
         }
       }
+      const remainingReasoning = reasoningAdapter.flush();
+      if (remainingReasoning.thinking || remainingReasoning.content) {
+        yield* normalize({thinking:(remainingReasoning.thinking ?? "") + (remainingReasoning.content ?? ""),thinkingActive:true});
+      }
+      yield* normalize(adapter.flush());
+      if (sawThinking) yield {thinking:{generation:round,text:"",active:false}};
       console.log(JSON.stringify({event:"llm.request.complete",model:this.modelId,round,durationMs:Date.now()-started}));
       if (!calls.size) return;
       if (!this.executeRuby || round === 3 || executions + calls.size > 3) throw new ChatError("tool_limit");
@@ -82,7 +106,7 @@ export class WorkersAIModel implements ChatModel {
 }
 
 // Handles split UTF-8, CRLF, multiple data lines, usage-only chunks, and truncated streams.
-export async function* parseSSE(stream: ReadableStream<Uint8Array>, signal: AbortSignal): AsyncIterable<ModelEvent> {
+export async function* parseSSE(stream: ReadableStream<Uint8Array>, signal: AbortSignal): AsyncIterable<Exclude<ModelEvent, {thinking:unknown} | {inferenceStarted:unknown} | {toolStatus:unknown}> | {reasoning:string}> {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -111,6 +135,8 @@ export async function* parseSSE(stream: ReadableStream<Uint8Array>, signal: Abor
           if (!Array.isArray(deltas)) throw new ChatError("invalid_tool_call");
           yield {toolDelta:deltas};
         }
+        const reasoning = chunk.choices?.[0]?.delta?.reasoning_content ?? chunk.choices?.[0]?.delta?.reasoning;
+        if (typeof reasoning === 'string' && reasoning) yield {reasoning};
         const text = chunk.choices?.[0]?.delta?.content ?? chunk.response;
         if (typeof text === "string" && text) yield { text };
         if (chunk.usage) {

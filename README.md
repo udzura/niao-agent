@@ -7,6 +7,7 @@ macOS に住むパーソナル AI コンパニオンの Phase 1。SwiftUI のネ
 - HTTP と WebSocket upgrade の Bearer 認証、macOS Keychain 保存
 - 切断時の指数バックオフ、スリープ・復帰、20 秒ごとの履歴照合
 - モデル: Gemma 4（既定）/ GLM 4.7 Flash を設定画面・APIから切り替え可能
+- Gemma 4のthinkingは回答と分離し、「思考過程」から開閉できます。再起動後も確認できます
 - チャット履歴の削除（モデル設定・使用量は保持）。ニュース収集、定期実行、長期記憶は含みません
 - 制限付きPicoRubyツールで計算・文字列処理（外部I/Oなし）
 
@@ -26,7 +27,7 @@ apps/
     src/generated/          # 同梱済みJS・Wasm
     wrangler.jsonc
   worker/
-    src/{index,auth,niao-agent,model,protocol}.ts
+    src/{index,auth,niao-agent,model,model-output,protocol}.ts
     test/
     wrangler.jsonc
     vitest.config.ts

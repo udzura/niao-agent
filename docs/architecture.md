@@ -22,10 +22,10 @@ sequenceDiagram
     Agent-->>Mac: accepted
     Agent->>AI: bounded context, streaming
     loop chunks
-        AI-->>Agent: text / usage
-        Agent-->>Mac: partial (cumulative transient text)
+        AI-->>Agent: text / thinking / usage
+        Agent-->>Mac: partial (cumulative transient text + thinking)
     end
-    Agent->>DB: transaction: assistant + completed turn
+    Agent->>DB: transaction: assistant + thinking + completed turn
     Agent-->>Mac: committed
 ```
 
@@ -96,3 +96,15 @@ The evaluator uses a Niao-owned C extension with PicoRuby's mruby backend and co
 The Runner has no resource bindings or secrets, disables workers.dev/preview URLs, and rejects HTTP requests. It exposes no networking/filesystem/ENV imports to Ruby. A per-isolate busy flag limits overlapping VM allocations. The instruction hook, source/output caps, and fixed 32MiB linear memory remain. References are dropped after each request; memory reclamation is GC-driven, not immediate.
 
 This removes the paid-only Dynamic Workers dependency, but also removes its outbound-network policy and per-invocation CPU limit. Service Binding separation is not an equivalent untrusted-code security boundary: the standard Worker host still has network APIs, and callers/callees may share a thread. Bytecode fuel does not meter native C/compiler work, and AbortSignal cannot preempt it. Only platform CPU enforcement covers those paths. Local Node CPU measurements suggest lightweight workloads are candidates for Free, but first execution approaches 10ms; hosted Free behavior is unverified without deployment. See [ruby-tool.md](ruby-tool.md).
+
+## Gemma thinking output (2026-10-29)
+
+`ModelOutputAdapter` normalizes text without owning tools, persistence, or orchestration. `DefaultAdapter` passes content through exactly. `Gemma4Adapter` recognizes Google's documented `<|channel>thought\n...<channel|>answer` format using a streaming state machine. It retains only a possible delimiter prefix or a bounded channel header, so final content does not wait for the whole generation. Unknown channel headers are treated as thinking; incomplete delimiter prefixes are withheld at EOF. A plain word such as `thought` without a delimiter is ordinary text, rather than a heuristic signal to delete text.
+
+References inspected: [Google's Gemma 4 prompt format](https://ai.google.dev/gemma/docs/core/prompt-formatting-gemma4), [official chat template](https://huggingface.co/google/gemma-4-26B-A4B-it/raw/main/chat_template.jinja), and [Cloudflare's Gemma model schema](https://developers.cloudflare.com/workers-ai/models/gemma-4-26b-a4b-it/). Local requests using the real remote AI binding also confirmed `choices[0].delta.reasoning_content` alongside `delta.content`. For Gemma only, structured `reasoning_content` (or `reasoning`) is routed to thinking and normalized for stray channel delimiters. Other models keep their existing content behavior. Model selection, token budget, and the production `enable_thinking:false` setting are unchanged; support for returned thinking does not force the model to generate it.
+
+Every model invocation, including each tool continuation, gets fresh adapters. Thinking events carry a zero-based `generation` index within the turn. Text normalization never receives structured function arguments/results. Only normalized assistant content is sent in the next tool-continuation request, and future-turn context queries select only `niao_messages.content`.
+
+The optional `thinking` array accompanies cumulative partial/active snapshots and committed assistant messages. Each segment has `generation`, `text`, and `active`. Thinking is bounded to 32,000 UTF-16 code units across a turn, independently of the existing 64,000-unit answer limit. Successful completion saves nonblank thinking in `niao_thinking(requestId,generation,text)` in the same transaction as the assistant message and completed turn. Restored segments are inactive. `CREATE TABLE IF NOT EXISTS` adds the table on activation without rewriting existing history or requiring a Durable Object class migration. History deletion removes these rows too.
+
+Thinking is displayed above the answer in a native, initially collapsed 「思考過程」 disclosure. Expanded text is subdued and preserves whitespace; tool continuations are labelled by generation. Active thinking shows an in-progress indicator. Thinking remains accessible after reconnect/app or Agent restart for completed turns. Failed/interrupted generations keep the existing transient-output policy: neither partial answer nor partial thinking is committed. A thinking-only response is an `empty_ai_response`, never an implicit final answer. Legacy stored raw responses are not retrospectively reinterpreted because they have no trustworthy model/format metadata. Thinking is private conversation data and is never included in logs.

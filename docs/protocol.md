@@ -39,7 +39,7 @@ Use a UUID and preserve it for retries. Content is trimmed and must contain 1–
 | --- | --- | --- |
 | `ready` | `bootId`, `active` | Connected; perform HTTP synchronization. `active` is a transient snapshot or null. |
 | `accepted` | `requestId`, `message` | User row is durable; do not create another local duplicate. |
-| `partial` | `requestId`, `text` | Replace transient assistant text with this **cumulative** snapshot. Not a delta or committed row. |
+| `partial` | `requestId`, `text`, optional `thinking` | Replace transient assistant text/thinking with this **cumulative** snapshot. Not a delta or committed row. |
 | `committed` | `requestId`, `messages` | Durable user/assistant pair. Merge by ID and clear transient display. |
 | `tool_status` | `requestId`, `name`, `status` | Transient tool activity (`running` or `completed`); no code/output is sent to the UI. |
 | `settings_updated` | `settings` | Persisted model selection changed. |
@@ -51,6 +51,23 @@ All server frames include `v:1` and the current `epoch`. Accepted/partial/commit
 Error codes: `tool_limit`, `invalid_tool_call`, `invalid_message`, `id_conflict`, `busy`, `interrupted`, `ai_rate_limited`, `ai_timeout`, `ai_unavailable`, `invalid_ai_response`, `incomplete_ai_stream`, `empty_ai_response`, `response_too_large`, `internal_error`. Some provider quota errors do not supply a numeric HTTP status and are safely classified as `ai_unavailable`; the raw provider error is intentionally withheld.
 
 A failed turn can be retried with the same ID and identical trimmed content. A running duplicate cannot start another generation. Completed duplicates do not call the model. There is no cancel, edit, or regeneration command. Whole-history deletion is available over HTTP. Partial stream replay is intentionally not durable: after a connection interruption, HTTP and `ready` provide the latest active snapshot or completed history; after an isolate crash the user explicitly retries an interrupted turn.
+
+## Optional thinking output
+
+`partial`, HTTP/`ready` `active` snapshots, and committed assistant message objects may include:
+
+```json
+{
+  "thinking": [
+    {"generation":0,"text":"Before tool execution\n  Indentation is preserved.","active":false},
+    {"generation":1,"text":"Considering the result…","active":true}
+  ]
+}
+```
+
+`text` on partial/active and `content` on committed messages always contain only answer text. `thinking` is a cumulative array, not a sequence of deltas. `generation` is zero-based within one request/turn, increasing for each model invocation after a tool call (maximum 3). Segment text retains whitespace and has no channel delimiters; `active` indicates thinking in progress. Committed segments always have `active:false`. Blank completed segments are omitted; messages with no thinking need not include the field. Older clients can ignore this additive field, and newer clients accept older messages without it.
+
+Thinking is saved separately only when the assistant turn successfully commits. History and completed-duplicate replies restore the same segments. Cleanup deletes thinking along with messages/turns. Failed/interrupted output is discarded, and thinking is never part of the normal model conversation context. Tool status/schema/results remain unchanged. See [normalization and limitations](architecture.md#gemma-thinking-output-2026-10-29).
 
 ## Usage snapshot
 

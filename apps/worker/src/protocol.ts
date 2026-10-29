@@ -1,5 +1,6 @@
 export const MAX_INPUT = 8_000;
 export type Role = "user" | "assistant";
+export interface ThinkingSegment { generation: number; text: string; active: boolean }
 export interface Message {
   seq: number;
   id: string;
@@ -7,6 +8,7 @@ export interface Message {
   role: Role;
   content: string;
   createdAt: string;
+  thinking?: ThinkingSegment[];
 }
 export interface Turn {
   requestId: string;

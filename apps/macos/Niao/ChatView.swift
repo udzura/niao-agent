@@ -39,6 +39,7 @@ struct ChatView: View {
                         if store.busy {
                             VStack(alignment: .leading, spacing: 8) {
                                 HStack { ProgressView().controlSize(.small); Text(store.toolRunning ? "Niao · Rubyで計算中" : "Niao · 生成中").font(.caption).foregroundStyle(.secondary) }
+                                ThinkingDisclosureView(segments: store.partial?.thinking ?? [])
                                 if let text = store.partial?.text, !text.isEmpty { ChatMarkdownView(content: text) }
                             }.padding(12).frame(maxWidth: .infinity, alignment: .leading)
                                 .background(.quaternary, in: RoundedRectangle(cornerRadius: 12))
@@ -90,6 +91,7 @@ struct MessageRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(message.role == "user" ? "あなた" : "Niao").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            if message.role == "assistant" { ThinkingDisclosureView(segments: message.thinking ?? []) }
             ChatMarkdownView(content: message.content)
         }
         .padding(12)

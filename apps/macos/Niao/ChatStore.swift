@@ -222,7 +222,7 @@ final class ChatStore: ObservableObject {
                 if outbox?.requestId == message.requestId { clearOutbox() }
             }
         case "partial":
-            if let requestID = event.requestId { partial = PartialMessage(requestId: requestID, text: event.text ?? "") }
+            if let requestID = event.requestId { partial = PartialMessage(requestId: requestID, text: event.text ?? "", thinking: event.thinking) }
         case "committed":
             toolRunning = false
             finishToolTurn(event)

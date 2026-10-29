@@ -2,11 +2,11 @@ import { rubyExecutor } from "./ruby/tool";
 import { Agent, type Connection, type ConnectionContext, type WSMessage } from "agents";
 import type { Env } from "./index";
 import { boundedContext, DEFAULT_MODEL, MODELS, isModelID, type ModelID, WorkersAIModel, type ChatModel, type ModelMessage } from "./model";
-import { ChatError, errorCode, parseSubmission, type Message, type Turn } from "./protocol";
+import { ChatError, errorCode, parseSubmission, type Message, type Turn, type ThinkingSegment } from "./protocol";
 
 import { UsageAnalytics, utcDay, validNeurons } from "./usage";
 
-type Active = { requestId: string; text: string };
+type Active = { requestId: string; text: string; thinking?: ThinkingSegment[] };
 const log = (event: string, fields: Record<string, unknown> = {}) => console.log(JSON.stringify({event, ...fields}));
 
 export class NiaoAgent extends Agent<Env> {
@@ -23,6 +23,10 @@ export class NiaoAgent extends Agent<Env> {
       role TEXT NOT NULL CHECK(role IN ('user','assistant')),
       content TEXT NOT NULL, createdAt TEXT NOT NULL,
       UNIQUE(requestId, role)
+    )`;
+    this.sql`CREATE TABLE IF NOT EXISTS niao_thinking (
+      requestId TEXT NOT NULL, generation INTEGER NOT NULL, text TEXT NOT NULL,
+      PRIMARY KEY(requestId, generation)
     )`;
     this.sql`CREATE TABLE IF NOT EXISTS niao_turns (
       requestId TEXT PRIMARY KEY, status TEXT NOT NULL, errorCode TEXT
@@ -75,6 +79,7 @@ export class NiaoAgent extends Agent<Env> {
       this.ctx.storage.transactionSync(() => {
         this.sql`DELETE FROM niao_messages`;
         this.sql`DELETE FROM niao_turns`;
+        this.sql`DELETE FROM niao_thinking`;
         this.sql`UPDATE niao_settings SET epoch = epoch + 1 WHERE id = 1`;
       });
       this.publish({type: "history_cleared"});
@@ -88,7 +93,7 @@ export class NiaoAgent extends Agent<Env> {
     const settings = this.settings();
     if (Number(url.searchParams.get("epoch") ?? "0") !== settings.epoch) after = 0;
     const rows = this.sql<Message>`SELECT * FROM niao_messages WHERE seq > ${after} ORDER BY seq LIMIT 101`;
-    const messages = rows.slice(0, 100);
+    const messages = this.withThinking(rows.slice(0, 100));
     return Response.json({v: 1, epoch: settings.epoch, settings: this.settingsResponse(), messages, cursor: messages.at(-1)?.seq ?? after, hasMore: rows.length > 100,
       turns: this.sql<Turn>`SELECT * FROM niao_turns WHERE status != 'completed'`, active: this.active,
     }, {headers: {"Cache-Control": "no-store"}});
@@ -112,6 +117,13 @@ export class NiaoAgent extends Agent<Env> {
       local: {...recorded, trackingSince}}, {headers: {"Cache-Control": "no-store"}});
   }
 
+  private withThinking(messages: Message[]): Message[] {
+    return messages.map(message => {
+      if (message.role !== "assistant") return message;
+      const rows = this.sql<{generation:number;text:string}>`SELECT generation, text FROM niao_thinking WHERE requestId = ${message.requestId} ORDER BY generation`;
+      return rows.length ? {...message,thinking:rows.map(row => ({...row,active:false}))} : message;
+    });
+  }
   private settings(): {modelId: ModelID; epoch: number} {
     return this.sql<{modelId: ModelID; epoch: number}>`SELECT modelId, epoch FROM niao_settings WHERE id = 1`[0];
   }
@@ -130,7 +142,7 @@ export class NiaoAgent extends Agent<Env> {
       if (existing && existing.content !== input.content) throw new ChatError("id_conflict");
       const turn = this.sql<Turn>`SELECT * FROM niao_turns WHERE requestId = ${requestId}`[0];
       if (turn?.status === "completed") {
-        this.send(connection, {type: "committed", requestId, messages: this.sql<Message>`SELECT * FROM niao_messages WHERE requestId = ${requestId} ORDER BY seq`});
+        this.send(connection, {type: "committed", requestId, messages: this.withThinking(this.sql<Message>`SELECT * FROM niao_messages WHERE requestId = ${requestId} ORDER BY seq`)});
         return;
       }
       if (this.active) {
@@ -183,6 +195,12 @@ export class NiaoAgent extends Agent<Env> {
       // when many newer completed messages exist. Reuse its original context.
       recent.push({role: "user", content: user.content});
       let text = "";
+      const thinking: ThinkingSegment[] = [];
+      let thinkingLength = 0;
+      const publishPartial = () => {
+        this.active = {requestId,text,...(thinking.length ? {thinking} : {})};
+        this.publish({type:"partial",...this.active});
+      };
       let usage: Record<string, number> = {};
       const consume = async () => {
         for await (const part of this.createModel(modelId).stream(boundedContext(recent), controller.signal)) {
@@ -190,9 +208,16 @@ export class NiaoAgent extends Agent<Env> {
           if ("text" in part) {
             text += part.text;
             if (text.length > 64_000) throw new ChatError("response_too_large");
-            this.active = {requestId, text};
-            // Full transient snapshot makes duplicate/out-of-order replay unnecessary.
-            this.publish({type: "partial", requestId, text});
+            publishPartial();
+          } else if ("thinking" in part) {
+            const {generation,text:delta,active} = part.thinking;
+            if (!Number.isInteger(generation) || generation < 0 || generation > 3) throw new ChatError("invalid_ai_response");
+            thinkingLength += delta.length;
+            if (thinkingLength > 32_000) throw new ChatError("response_too_large");
+            let segment = thinking.find(item => item.generation === generation);
+            if (!segment) { segment = {generation,text:"",active}; thinking.push(segment); }
+            segment.text += delta; segment.active = active;
+            publishPartial();
           } else if ("inferenceStarted" in part) {
             attemptId = crypto.randomUUID();
             usage = {};
@@ -215,9 +240,12 @@ export class NiaoAgent extends Agent<Env> {
       this.ctx.storage.transactionSync(() => {
         this.sql`INSERT INTO niao_messages (id, requestId, role, content, createdAt)
           VALUES (${`assistant:${requestId}`}, ${requestId}, 'assistant', ${text}, ${new Date().toISOString()})`;
+        for (const segment of thinking.filter(item => item.text.trim())) {
+          this.sql`INSERT INTO niao_thinking (requestId, generation, text) VALUES (${requestId}, ${segment.generation}, ${segment.text})`;
+        }
         this.sql`UPDATE niao_turns SET status = 'completed', errorCode = NULL WHERE requestId = ${requestId}`;
       });
-      this.publish({type: "committed", requestId, messages: this.sql<Message>`SELECT * FROM niao_messages WHERE requestId = ${requestId} ORDER BY seq`});
+      this.publish({type: "committed", requestId, messages: this.withThinking(this.sql<Message>`SELECT * FROM niao_messages WHERE requestId = ${requestId} ORDER BY seq`)});
       log("llm.complete", {requestId, model: modelId, durationMs: Date.now() - start, usage});
     } catch (error) {
       const code = errorCode(error);

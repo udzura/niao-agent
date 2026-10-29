@@ -266,3 +266,54 @@ it('accounts separately for each model invocation around a tool call', async () 
   expect(usage.local.attempts).toBe(2); expect(usage.local.neurons).toBe(5);
   expect(client.events.filter(e => e.type === 'tool_status').map(e => e.status)).toEqual(['running','completed']);
 });
+
+it('streams separated thoughts, persists per-generation thinking after eviction and never uses it as context',async()=>{
+  await runInDurableObject(await stub(),(agent:NiaoAgent)=>{
+    (agent as any).createModel=()=>({async *stream(messages:any[]){
+      if(JSON.stringify(messages).includes('PRIVATE_THINKING'))throw new Error('Thinking leaked to context');
+      yield {thinking:{generation:0,text:'PRIVATE_THINKING before tool',active:true}};
+      await new Promise(resolve=>setTimeout(resolve,40));
+      yield {thinking:{generation:0,text:'',active:false}};
+      yield {toolStatus:'running'};yield {toolStatus:'completed'};
+      yield {inferenceStarted:true};
+      yield {thinking:{generation:1,text:'PRIVATE_THINKING after tool',active:false}};
+      yield {text:'normalized answer'};
+    }});
+  });
+  const client=await connect();const id=crypto.randomUUID();send(client.ws,id);
+  await client.until(e=>e.type==='partial'&&e.thinking?.[0]?.active===true);
+  const active=await history();expect(active.active.thinking[0].text).toContain('PRIVATE_THINKING');
+  const complete=await client.until(e=>e.type==='committed'&&e.requestId===id);
+  const assistant=complete.messages[1];
+  expect(assistant.content).toBe('normalized answer');
+  expect(assistant.thinking).toEqual([
+    {generation:0,text:'PRIVATE_THINKING before tool',active:false},
+    {generation:1,text:'PRIVATE_THINKING after tool',active:false},
+  ]);
+  send(client.ws,crypto.randomUUID());
+  await client.until(e=>e.type==='committed'&&e.requestId!==id); // Fixture checks context above.
+  client.ws.close();await evictDurableObject(await stub(),{webSockets:'close'});
+  const restored=await history();expect(restored.messages[1]).toEqual(assistant);
+  const next=await connect();send(next.ws,id);
+  expect((await next.until(e=>e.type==='committed')).messages[1]).toEqual(assistant);
+  next.ws.close();
+  const cleared=await SELF.fetch(`${base}/history`,{method:'DELETE',headers:{...headers,'If-Match':'"0"'}});
+  expect(cleared.status).toBe(200);await cleared.text();
+  await runInDurableObject(await stub(),(agent:NiaoAgent)=>{
+    expect((agent as any).sql`SELECT * FROM niao_thinking`).toEqual([]);
+  });
+});
+
+it('bounds thinking output and does not commit a thinking-only assistant response',async()=>{
+  await runInDurableObject(await stub(),(agent:NiaoAgent)=>{
+    (agent as any).createModel=()=>({async *stream(){yield {thinking:{generation:0,text:'only thoughts',active:false}};}});
+  });
+  const client=await connect();send(client.ws,crypto.randomUUID());
+  expect((await client.until(e=>e.type==='error')).code).toBe('empty_ai_response');
+  expect((await history()).messages.map((m:any)=>m.role)).toEqual(['user']);
+  await runInDurableObject(await stub(),(agent:NiaoAgent)=>{
+    (agent as any).createModel=()=>({async *stream(){yield {thinking:{generation:0,text:'x'.repeat(32001),active:true}};}});
+  });
+  const next=crypto.randomUUID();send(client.ws,next);
+  expect((await client.until(e=>e.type==='error'&&e.requestId===next)).code).toBe('response_too_large');
+});

@@ -1,5 +1,11 @@
 import Foundation
 
+struct ThinkingSegment: Codable, Identifiable, Equatable {
+    let generation: Int
+    let text: String
+    let active: Bool
+    var id: Int { generation }
+}
 struct ChatMessage: Codable, Identifiable, Equatable {
     let seq: Int
     let id: String
@@ -7,6 +13,7 @@ struct ChatMessage: Codable, Identifiable, Equatable {
     let role: String
     let content: String
     let createdAt: String
+    var thinking: [ThinkingSegment]? = nil
 }
 struct Turn: Codable {
     let requestId: String
@@ -16,6 +23,7 @@ struct Turn: Codable {
 struct PartialMessage: Codable {
     let requestId: String
     let text: String
+    var thinking: [ThinkingSegment]? = nil
 }
 struct HistoryPage: Decodable {
     let epoch: Int?
@@ -28,6 +36,7 @@ struct HistoryPage: Decodable {
     let active: PartialMessage?
 }
 struct ServerEvent: Decodable {
+    let thinking: [ThinkingSegment]?
     let name: String?
     let status: String?
     let epoch: Int?
