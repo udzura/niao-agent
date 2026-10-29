@@ -110,3 +110,11 @@ Wrangler and Xcode initially encountered this execution environment's filesystem
 - Added regression cases for 301/302/303/307/308 and updated the request-options assertion. No deployment performed; account retrieval still requires confirmation after the user redeploys.
 
 - After deploying the manual-redirect fix, the user confirmed the production usage API returned `account.status: "available"`, a numeric Neurons total and `errorCode: null`. Final local checks passed all 51 backend tests, typechecking and Agent dry-run.
+
+## mruby-random / mruby-time — 2026-10-28
+
+- Linked both core gems from the already pinned mruby submodule; regenerated the checked-in JS/Wasm without changing upstream checkouts. Wasm grew from 891535 to 909357 bytes (+17822 bytes).
+- All **61 backend tests** pass (10 new gem-specific cases). Real Service Binding/Wasm tests cover explicit/implicit seeds, reproducible sequences, float/range rand, shuffle/sample/bytes, UTC dates, epoch arithmetic, actual Time.now, class/global isolation, random/time fuel exhaustion, oversized binary results and allocations. The binary size check uses bytesize, not UTF-8 character count.
+- Typechecking and Agent dry-run passed; the Runner dry-run is part of npm test and passed. Wrangler multi-worker local smoke returned seeded sequence `59,93,25,33,22`, UTC epoch `1793145600` and the actual UTC current time. No remote AI calls or deployment were performed.
+- Extended the reproducible local CPU benchmark with random/time workloads. Raw data: [ruby-random-time-local.json](benchmarks/ruby-random-time-local.json). Warm medians: random100 0.421ms, time arithmetic 0.375ms. First arithmetic call 13.466ms CPU; module load 7.497ms separately. Hosted Free-plan compatibility remains unverified; the observed cold local cost exceeds 10ms.
+- Tool metadata now advertises the gems and removes the obsolete claim that the tool has no clock. Time.now reads host time; files, network, ENV, require and execution limits remain unchanged. No client rebuild is needed for this change.

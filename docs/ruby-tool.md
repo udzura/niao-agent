@@ -24,6 +24,26 @@ Niao.app → NiaoAgent → ruby_eval → RUBY_RUNNER.execute({code})
 
 `puts` / `print` / `p`は上限付き診断出力です。各引数の後に改行するため、CRubyの厳密な出力互換ではありません。`stdout`はモデルへ返しますがホストのconsoleへ流しません。途中まで出力して例外になった場合も、回収済みの出力は返します。
 
+## 同梱gem: random / time
+
+固定済みmrubyソース内の`mruby-random`と`mruby-time`を静的リンクしています。実行時の`require`は不要で、引き続き無効です。別gemや上流パッチは追加していません。
+
+```ruby
+r = Random.new(123)
+Array.new(5) { r.rand(100) }.join(",") # "59,93,25,33,22"
+```
+
+```ruby
+puts Time.now.utc.to_s
+Time.utc(2026, 10, 28).to_i # 1793145600
+```
+
+`rand` / `srand`、`Random.new`、範囲指定、`Array#sample` / `shuffle`、`Random#bytes`、`Time.now` / `utc` / `at`、日時計算を実RPC/Wasmで確認しました。乱数はシミュレーション等のための擬似乱数で、暗号用ではありません。バイナリの長さは`bytesize`で調べます。`Random#bytes`の値をそのまま返すとUTF-8への変換で情報が失われる場合があるため、バイナリはテキストへ整形してください。
+
+`Time.now`はホストの時刻を読み取ります。Workersでは同期実行中に時刻が進まないことがあるため、経過時間による無限ループ停止には使えません。停止には既存の命令数制限を使用します。日時の基準にはUTCを推奨します。返す最後の式は引き続き文字列・数値・真偽値・nilに限るので、Timeオブジェクトは`to_i`や`to_s`へ変換します。
+
+ローカルsmoke Worker起動後、`curl 'http://127.0.0.1:8790?example=random'`と`curl 'http://127.0.0.1:8790?example=time'`でも確認できます。今回の機能を本番へ反映する際はRunnerと、ツール説明を更新したAgentをデプロイします。macOSアプリの再ビルドは不要です。
+
 ## 実行制限と安全性の境界
 
 - ソース8KiB（UTF-8）、VM命令20万回、診断出力4KiB、結果8KiB。
@@ -119,3 +139,7 @@ Apple Silicon / Node v26.12.1でのローカル測定（各30回、初回を別�
 初回コストや複雑なコードが制限を超える場合は、ソース/処理量を絞る、VMとコンパイラのビルドを軽量化する、必要な計算だけ固定ツールとして実装する、ユーザーのMac上で実行する、という選択肢があります。自動的な有料実行への切り替えは行いません。
 
 公式資料: [Service Binding RPC](https://developers.cloudflare.com/workers/runtime-apis/bindings/service-bindings/rpc/)、[Service Bindingの実行特性](https://developers.cloudflare.com/workers/runtime-apis/bindings/service-bindings/)、[WebAssembly](https://developers.cloudflare.com/workers/runtime-apis/webassembly/)、[multi-worker開発](https://developers.cloudflare.com/workers/local-development/multi-workers/)、[Workers制限](https://developers.cloudflare.com/workers/platform/limits/)。
+
+### random/time追加後のローカル計測
+
+追加後の記録は[ruby-random-time-local.json](benchmarks/ruby-random-time-local.json)。100個のseed付き乱数の生成はCPU中央値0.421ms（p95 0.942ms）、現在時刻とUTC日時の差の計算は0.375ms（p95 1.053ms）でした。モジュールロードCPUは7.497ms、最初の算術実行は13.466msでした。ローカルNode/V8の測定であり、本番WorkersのCPU計測ではありません。初回はFreeの10msを超える値なので、Freeでの動作保証はできません。既存のcold-start制約は継続します。

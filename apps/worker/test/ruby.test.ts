@@ -54,3 +54,47 @@ describe('static Runner RPC contract', () => {
     expect(result.value).toBe('2');
   });
 });
+
+describe('bundled mruby-random and mruby-time in the real RPC/Wasm runtime', () => {
+  it('supports reproducible seeded generators and Kernel srand/rand', async () => {
+    const code = 'srand(123); a = Array.new(8) { rand(10000) }; srand(123); b = Array.new(8) { rand(10000) }; r = Random.new(123); c = Array.new(8) { r.rand(10000) }; a == b && b == c';
+    expect(await run(code)).toMatchObject({ok:true,value:'true'});
+    const sequence = 'r = Random.new(42); Array.new(8) { r.rand(10000) }.join(",")';
+    const first = await run(sequence);
+    await run('srand(999); 100.times { rand }; 1');
+    expect(await run(sequence)).toMatchObject({ok:true,value:first.value});
+  });
+  it.each([
+    ['implicit seed/range', 'r = Random.new; a = Array.new(50) { r.rand(2..5) }; a.all? { |n| n >= 2 && n <= 5 }'],
+    ['Kernel float rand', 'r = rand; r >= 0 && r < 1'],
+    ['shuffle', '[1,2,3].shuffle.sort == [1,2,3]'],
+    ['sample', '[1,2,3].include?([1,2,3].sample)'],
+    ['random bytes', 'Random.new.bytes(16).bytesize == 16'],
+  ])('supports %s',async (_name,code) => {
+    expect(await run(code)).toMatchObject({ok:true,value:'true'});
+  });
+  it('calculates explicit UTC dates and epoch arithmetic',async () => {
+    const expected = String(Date.UTC(2026,9,28,13,26,15)/1000);
+    expect(await run('Time.utc(2026,10,28,13,26,15).to_i')).toMatchObject({ok:true,value:expected});
+    expect(await run('t = Time.at(0).utc; [t.year,t.month,t.day,t.hour,t.min,t.sec,(t+90).to_i].join(",")')).toMatchObject({ok:true,value:'1970,1,1,0,0,0,90'});
+  });
+  it('reads the actual host clock through Time.now and captures time output',async () => {
+    const before = Math.floor(Date.now()/1000);
+    const result = await run('puts Time.now.to_i; Time.now.to_i');
+    expect(result.ok).toBe(true);
+    expect(Number(result.value)).toBeGreaterThanOrEqual(before - 2);
+    expect(Number(result.value)).toBeLessThanOrEqual(Math.floor(Date.now()/1000) + 2);
+    expect(result.stdout).toMatch(/^\d+\n$/);
+  });
+  it('keeps gem monkey patches and global seed variables local to an execution',async () => {
+    expect(await run('class Time; def self.niao_marker; 1; end; end; $niao_seed = srand(123); 1')).toMatchObject({ok:true,value:'1'});
+    expect(await run('$niao_seed')).toMatchObject({ok:true,value:'null'});
+    expect(await run('Time.niao_marker')).toMatchObject({ok:false,error:'ruby_error'});
+  });
+  it('still stops random/time loops and oversized allocations/results',async () => {
+    expect(await run('loop { rand; Time.now }')).toMatchObject({ok:false,error:'instruction_limit'});
+    expect(await run('Random.new(1).bytes(9000)')).toMatchObject({ok:false,error:'output_limit'});
+    expect((await run('Random.new(1).bytes(100000000)')).ok).toBe(false);
+    expect(await run('Time.at(0).to_i')).toMatchObject({ok:true,value:'0'});
+  });
+});

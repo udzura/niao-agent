@@ -22,6 +22,8 @@ const snippets = [
   ['sum100','(1..100).inject(0) { |s,n| s+n*n }'],
   ['sum1000','(1..1000).inject(0) { |s,n| s+n }'],
   ['fuel_exhaustion','loop {}'],
+  ['random','r = Random.new(123); Array.new(100) { r.rand(1000) }.join(",")'],
+  ['time','Time.now.to_i - Time.utc(2026,1,1).to_i'],
 ];
 const percentile = (values,p) => [...values].sort((a,b)=>a-b)[Math.min(values.length-1,Math.ceil(values.length*p)-1)];
 const workloads = [];

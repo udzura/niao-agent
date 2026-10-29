@@ -12,6 +12,6 @@ MRuby::CrossBuild.new('niao-ruby') do |conf|
   conf.picoruby(alloc_estalloc: false)
   conf.gem core: 'mruby-compiler'
   core = File.join(MRUBY_ROOT, 'mrbgems/picoruby-mruby/lib/mruby/mrbgems')
-  %w[mruby-array-ext mruby-enum-ext mruby-hash-ext mruby-string-ext mruby-numeric-ext mruby-math].each { |g| conf.gem gemdir: File.join(core, g) }
+  %w[mruby-array-ext mruby-enum-ext mruby-hash-ext mruby-string-ext mruby-numeric-ext mruby-math mruby-random mruby-time].each { |g| conf.gem gemdir: File.join(core, g) }
   conf.gem gemdir: ENV.fetch('NIAO_SANDBOX_ROOT')
 end
