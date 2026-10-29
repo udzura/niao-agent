@@ -2,6 +2,8 @@
 
 Niao は Cloudflare の公式 GraphQL Analytics API を Worker から呼び、アカウント全体の当日使用量を表示できます。macOS アプリには Cloudflare API トークンを渡しません。既存の `NIAO_TOKEN` で Niao の API にアクセスします。
 
+メイン画面は当日の値と集計範囲のみを表示します。グラフボタン、またはメニューバーの「利用状況統計…」から開き、「Neurons」で内訳・Thinking判定の待ち時間・取得エラー・集計日時を確認できます。同じウィンドウから「ツール」の統計へ切り替えられます。
+
 ## 1. Analytics 読み取り用トークンを作る
 
 Cloudflare ダッシュボードの **Account API tokens** で **Create Token → Custom token / Get started** を選びます。
@@ -42,7 +44,7 @@ npm run deploy
 
 `CF_ACCOUNT_ID` は秘密情報ではありませんが、ここでは設定方法を揃えるため secret として保存します。`CF_ANALYTICS_TOKEN` には手順 1 のトークンを入力します。`NIAO_TOKEN` の変更は不要です。`wrangler secret put` 自体も現在の Worker のデプロイを更新する操作です。
 
-更新された Niao アプリで再接続し、使用量欄の更新ボタンを押します。**「今日 (UTC) · アカウント全体」** と表示されれば取得成功です。新しいアイコン・使用量欄を取り込む場合は、アプリを終了して `npm run build:macos` 後に起動し直してください。
+更新された Niao アプリで再接続し、「利用状況統計」→「Neurons」の「更新」を押します。**「今日 (UTC) · アカウント全体」** と表示されれば取得成功です。アプリの更新を取り込む場合は、アプリを終了して `npm run build:macos` 後に起動し直してください。
 
 ## ローカル Worker に設定する場合
 

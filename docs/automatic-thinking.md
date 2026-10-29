@@ -52,7 +52,7 @@ judge Neurons換算値 = input_tokens × 3455 / 1,000,000
 
 このレートは `src/thinking-policy.ts` の `JUDGE_NEURONS_PER_M_INPUT` で管理し、各記録にも入力トークン数と使用レートを保持します。料金変更時は更新が必要です。換算値は確定した課金実績ではありません。[Cloudflare公式料金表](https://developers.cloudflare.com/workers-ai/platform/pricing/#other-model-pricing)
 
-アプリの使用量詳細にjudgeのNeurons・件数・累計/平均待ち時間を表示し、換算値を含むことを明示します。待ち時間はmsで保持し、Neuronsへ換算しません。アカウント全体のAnalyticsは既にjudgeを含むため、ローカル記録を追加加算しません。
+アプリの「利用状況統計」→「Neurons」にjudgeのNeurons・件数・累計/平均待ち時間を表示し、換算値を含むことを明示します。メイン画面は現在値のみです。待ち時間はmsで保持し、Neuronsへ換算しません。アカウント全体のAnalyticsは既にjudgeを含むため、ローカル記録を追加加算しません。
 
 usageを取得できない失敗・中断・タイムアウトは「使用量未取得」として件数を残します。キャンセルを無視したリクエストが後から消費した分など、取得できなかった実使用量はローカル記録に復元しません。Analyticsの全体値と併せて確認してください。
 

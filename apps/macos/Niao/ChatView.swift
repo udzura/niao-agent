@@ -12,8 +12,8 @@ struct ChatView: View {
                 Text(store.connection).font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 if !store.connected { Button("再接続") { store.reconnect() } }
-                Button { openWindow(id: "tool-statistics") } label: { Image(systemName: "chart.bar") }
-                    .help("ツール統計")
+                Button { openWindow(id: "usage-statistics") } label: { Image(systemName: "chart.bar") }
+                    .help("利用状況統計").accessibilityLabel("利用状況統計を開く")
                 Button { confirmClear = true } label: { Image(systemName: "trash") }
                     .disabled(!store.connected || store.busy || store.controlBusy).help("チャット履歴を削除")
                 Button { store.settingsPresented = true } label: { Image(systemName: "gearshape") }.help("設定")

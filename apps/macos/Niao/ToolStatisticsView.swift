@@ -2,7 +2,7 @@ import SwiftUI
 
 struct ToolStatisticsView: View {
     @ObservedObject var store: ChatStore
-    @State private var selection = "current"
+    @Binding var selection: String
     private var session: ToolSession? { store.toolStatistics.sessions.first { $0.id == store.toolSessionID } }
     private var counts: [String: ToolCounts] { selection == "current" ? session?.tools ?? [:] : store.toolStatistics.totals }
     var body: some View {
