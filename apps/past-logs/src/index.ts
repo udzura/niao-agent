@@ -2,8 +2,9 @@ import { z } from "zod";
 import { DocumentService } from "./documents";
 import { pastLogsMcp } from "./mcp";
 import { ApiError, idSchema, MAX_REQUEST_BYTES } from "./validation";
+import { SemanticIndex, type SemanticBindings } from "./semantic";
 
-export interface Env {
+export interface Env extends SemanticBindings {
   DB: D1Database;
   PAST_LOGS_ADMIN_TOKEN: string;
   PAST_LOGS_READ_TOKEN: string;
@@ -55,15 +56,25 @@ export default {
       if (path === "/health" && request.method === "GET") return json({ok: true, service: "niao-past-logs"});
       if (path === "/mcp") {
         await authorize(request, env, false);
-        const response = await pastLogsMcp(new DocumentService(env.DB))(request, env, ctx);
+        const response = await pastLogsMcp(new DocumentService(env.DB), new SemanticIndex(env.DB, env))(request, env, ctx);
         const headers = new Headers(response.headers); headers.set("Cache-Control", "no-store");
         return new Response(response.body, {status: response.status, headers});
+      }
+      if (path === "/api/semantic-index" || path === "/api/semantic-index/reindex") {
+        await authorize(request, env, true);
+        const index = new SemanticIndex(env.DB, env);
+        if (path === "/api/semantic-index" && request.method === "GET") return json(await index.summary());
+        if (path.endsWith("/reindex") && request.method === "POST") return json(await index.reindex(await readJson(request)));
+        return json({error: {code: "method_not_allowed", message: "Method not allowed"}}, 405);
       }
       const match = /^\/api\/documents(?:\/(doc_[a-f0-9]{64}))?$/.exec(path);
       if (!match) return json({error: {code: "not_found", message: "Not found"}}, 404);
       await authorize(request, env, true);
-      const documents = new DocumentService(env.DB), id = match[1];
-      if (!id && request.method === "POST") return json({document: await documents.upsert(await readJson(request))});
+      const documents = new DocumentService(env.DB), index = new SemanticIndex(env.DB, env), id = match[1];
+      if (!id && request.method === "POST") {
+        const document = await documents.upsert(await readJson(request));
+        return json({document, semantic_index: await index.sync(document.id)});
+      }
       if (id) {
         idSchema.parse(id);
         if (request.method === "GET") {
@@ -71,8 +82,11 @@ export default {
           if (!document) throw new ApiError(404, "not_found", "Document not found");
           return json({document});
         }
-        if (request.method === "PUT") return json({document: await documents.update(id, await readJson(request))});
-        if (request.method === "DELETE") return json(await documents.delete(id));
+        if (request.method === "PUT") {
+          const document = await documents.update(id, await readJson(request));
+          return json({document, semantic_index: await index.sync(id)});
+        }
+        if (request.method === "DELETE") return json({...await documents.delete(id), semantic_index: await index.sync(id)});
       }
       return json({error: {code: "method_not_allowed", message: "Method not allowed"}}, 405,
         {Allow: id ? "GET, PUT, DELETE" : "POST"});

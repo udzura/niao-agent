@@ -7,7 +7,7 @@ export type AdditionalTool = {
 };
 type Config = {PAST_LOGS_MCP_URL?: string; PAST_LOGS_MCP_TOKEN?: string};
 const serverId = "pastlogs";
-const names = new Set(["tool_pastlogs_search_past_logs", "tool_pastlogs_get_past_log"]);
+const names = new Set(["tool_pastlogs_search_past_logs", "tool_pastlogs_search_past_logs_semantic", "tool_pastlogs_get_past_log"]);
 const log = (code: string) => console.warn(JSON.stringify({event: "past_logs.mcp", code}));
 
 // The Agents SDK owns MCP discovery, JSON-RPC, transport, and tool invocation.
@@ -25,6 +25,7 @@ export async function withPastLogsTools<T>(manager: MCPClientManager, config: Co
   const turnSignal = AbortSignal.any([signal, lifetime.signal]);
   const setupTimer = setTimeout(() => lifetime.abort(), 5000);
   let tools: AdditionalTool[] = [];
+  let discovered = false;
   try {
     try {
       // Re-register per turn so secret/endpoint changes and hibernation cannot leave stale tools.
@@ -42,7 +43,7 @@ export async function withPastLogsTools<T>(manager: MCPClientManager, config: Co
             const headers = new Headers(request.headers);
             headers.set("Authorization", `Bearer ${config.PAST_LOGS_MCP_TOKEN}`);
             const response = await network(request, {headers, redirect: "manual",
-              signal: AbortSignal.any([turnSignal, request.signal, AbortSignal.timeout(5000)])});
+              signal: AbortSignal.any([turnSignal, request.signal, AbortSignal.timeout(discovered ? 15_000 : 5000)])});
             if (response.status >= 300 && response.status < 400) throw new Error("mcp_redirect_rejected");
             return response;
           },
@@ -52,6 +53,7 @@ export async function withPastLogsTools<T>(manager: MCPClientManager, config: Co
       if (state.state !== "connected") throw new Error("mcp_connection_failed");
       const discovery = await manager.discoverIfConnected(serverId, {timeoutMs: 5000});
       if (!discovery?.success) throw new Error("mcp_discovery_failed");
+      discovered = true;
       const catalog = manager.getAITools({serverId});
       tools = Object.entries(catalog).filter(([name]) => names.has(name)).map(([name, tool]) => {
         const schema = z.toJSONSchema(tool.inputSchema, {io: "input"});
@@ -66,7 +68,7 @@ export async function withPastLogsTools<T>(manager: MCPClientManager, config: Co
               // The manager's call API forwards cancellation/timeouts. The current
               // getAITools execute closure does not forward AbortSignal.
               const result = await manager.callTool({serverId, name: name.slice("tool_pastlogs_".length),
-                arguments: parsed.data as Record<string, unknown>}, {signal: callSignal, timeout: 8000});
+                arguments: parsed.data as Record<string, unknown>}, {signal: callSignal, timeout: 15_000});
               if (JSON.stringify(result).length > 40_000) return {ok: false, error: "tool_result_too_large"};
               return {untrusted_reference_data: true, result};
             } catch {

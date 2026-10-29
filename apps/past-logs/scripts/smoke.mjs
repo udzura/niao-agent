@@ -11,7 +11,7 @@ try {
     requestInit: {headers: {Authorization: `Bearer ${token}`}, redirect: "error"},
   }));
   const {tools} = await client.listTools();
-  assert.deepEqual(tools.map(t => t.name).sort(), ["get_past_log", "search_past_logs"]);
+  assert.deepEqual(tools.map(t => t.name).sort(), ["get_past_log", "search_past_logs", "search_past_logs_semantic"]);
   assert(tools.every(t => t.annotations.readOnlyHint));
   const search = await client.callTool({name: "search_past_logs", arguments: {query: "Cloudflare 日本語", limit: 5}});
   assert(!search.isError);

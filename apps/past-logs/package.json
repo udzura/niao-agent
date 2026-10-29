@@ -3,14 +3,17 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "wrangler dev --ip 127.0.0.1 --port 8788",
-    "build": "wrangler deploy --dry-run --outdir build",
-    "deploy": "wrangler deploy",
+    "dev": "wrangler dev --env development --ip 127.0.0.1 --port 8788",
+    "build": "wrangler deploy --env \"\" --dry-run --outdir build",
+    "deploy": "wrangler deploy --env \"\"",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "db:migrate": "wrangler d1 migrations apply DB --local",
+    "db:migrate": "wrangler d1 migrations apply DB --local --env development",
     "import:sample": "node scripts/import-samples.mjs",
-    "test:dev": "node scripts/smoke.mjs"
+    "test:dev": "node scripts/smoke.mjs",
+    "dev:offline": "wrangler dev -c wrangler.offline.jsonc --ip 127.0.0.1 --port 8788",
+    "reindex": "node scripts/reindex.mjs",
+    "test:semantic:live": "node scripts/semantic-smoke.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "2.3.1",

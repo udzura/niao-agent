@@ -1,0 +1,14 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "niao-past-logs",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-27",
+  "compatibility_flags": ["nodejs_compat"],
+  // Real local D1 and keyword search. Semantic calls return an explicit error;
+  // there is no offline fake embedding model or fake vector database.
+  "d1_databases": [{
+    "binding": "DB", "database_name": "niao-past-logs-dev",
+    "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "migrations"
+  }],
+  "observability": {"logs": {"enabled": false}}
+}

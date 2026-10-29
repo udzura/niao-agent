@@ -27,7 +27,7 @@ describe("Agents SDK MCP client with the real Past Logs Worker and D1", () => {
     const doc = await new DocumentService(bindings.PAST_LOGS_TEST_DB).upsert(sample);
     await runInDurableObject(await stub(), async (agent: NiaoAgent) => {
       await withPastLogsTools(agent.mcp, config, new AbortController().signal, async tools => {
-        expect(tools.map(t => t.definition.function.name).sort()).toEqual(["tool_pastlogs_get_past_log", "tool_pastlogs_search_past_logs"]);
+        expect(tools.map(t => t.definition.function.name).sort()).toEqual(["tool_pastlogs_get_past_log", "tool_pastlogs_search_past_logs", "tool_pastlogs_search_past_logs_semantic"]);
         const search = tools.find(t => t.definition.function.name.endsWith("search_past_logs"))!;
         const get = tools.find(t => t.definition.function.name.endsWith("get_past_log"))!;
         const hits = await search.execute({query: "日本語 Cloudflare"}, new AbortController().signal) as any;
@@ -36,6 +36,12 @@ describe("Agents SDK MCP client with the real Past Logs Worker and D1", () => {
         const content = await get.execute({id: doc.id}, new AbortController().signal) as any;
         expect(JSON.parse(content.result.content[0].text).body).toBe(sample.body);
         expect(await search.execute({query: "Ruby", limit: 99}, new AbortController().signal)).toEqual({ok: false, error: "invalid_tool_arguments"});
+        const semantic = tools.find(t => t.definition.function.name.endsWith("search_past_logs_semantic"))!;
+        const unavailable = await semantic.execute({query: "非同期処理の記憶"}, new AbortController().signal) as any;
+        // The offline auxiliary Worker has no fake production embeddings/Vectorize.
+        // SDK discovery/call still works and exposes a safe, recoverable tool error.
+        expect(unavailable.result.isError).toBe(true);
+        expect(JSON.parse(unavailable.result.content[0].text).error).toBe("semantic_not_configured");
         const rows = agent.sql`SELECT * FROM cf_agents_mcp_servers`;
         expect(JSON.stringify(rows)).not.toContain(readToken);
       }, network);

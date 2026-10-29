@@ -4,6 +4,8 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-10-27",
   "compatibility_flags": ["nodejs_compat"],
+  "ai": {"binding": "AI", "remote": true},
+  "vectorize": [{"binding": "VECTORIZE", "index_name": "niao-past-logs", "remote": true}],
   "d1_databases": [{
     "binding": "DB",
     "database_name": "niao-past-logs",
@@ -11,5 +13,15 @@
     "database_id": "00000000-0000-0000-0000-000000000000",
     "migrations_dir": "migrations"
   }],
-  "observability": {"logs": {"enabled": false}}
+  "observability": {"logs": {"enabled": false}},
+  "env": {
+    "development": {
+      "ai": {"binding": "AI", "remote": true},
+      "vectorize": [{"binding": "VECTORIZE", "index_name": "niao-past-logs-dev", "remote": true}],
+      "d1_databases": [{
+        "binding": "DB", "database_name": "niao-past-logs-dev",
+        "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "migrations"
+      }]
+    }
+  }
 }

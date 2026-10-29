@@ -25,6 +25,16 @@ export const searchInput = z.strictObject({
   limit: z.number().int().min(1).max(20).default(5),
   source: sourceSchema.optional(),
 });
+export const semanticSearchInput = searchInput.extend({
+  query: z.string().trim().min(1).max(2000),
+  min_score: z.number().min(-1).max(1).default(0),
+});
+export const reindexInput = z.strictObject({
+  // One article per request keeps worst-case binding/D1 calls within Free quotas.
+  limit: z.literal(1).default(1),
+  after: idSchema.optional(),
+  force: z.boolean().default(false),
+});
 export const getInput = z.strictObject({
   id: idSchema,
   offset: z.number().int().min(0).max(131072).default(0),

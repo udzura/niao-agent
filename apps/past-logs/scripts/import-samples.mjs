@@ -9,10 +9,10 @@ if (endpoint.protocol !== "https:" && !(endpoint.protocol === "http:" && ["127.0
 const documents = JSON.parse(await readFile(new URL("../samples/documents.json", import.meta.url), "utf8"));
 for (const document of documents) {
   const response = await fetch(new URL("/api/documents", endpoint), {
-    method: "POST", redirect: "error", signal: AbortSignal.timeout(15000),
+    method: "POST", redirect: "error", signal: AbortSignal.timeout(60000),
     headers: {"Content-Type": "application/json", Authorization: `Bearer ${token}`}, body: JSON.stringify(document),
   });
   if (!response.ok) throw new Error(`Sample import failed: HTTP ${response.status}`);
-  const {document: imported} = await response.json();
-  console.log(`Imported sample ${imported.id}`); // No article contents or credentials.
+  const {document: imported, semantic_index: index} = await response.json();
+  console.log(`Imported sample ${imported.id}; semantic=${index?.status ?? "unknown"}${index?.error_code ? "; " + index.error_code : ""}`);
 }

@@ -119,10 +119,10 @@ describe("authenticated management REST API", () => {
 });
 
 describe("stateless MCP read-only tools over Streamable HTTP", () => {
-  it("discovers exactly two read-only tools, searches and retrieves source references", async () => {
+  it("discovers three read-only tools, searches and retrieves source references", async () => {
     const doc = await docs().upsert(input());
     const list = await rpc("tools/list"); expect(list.status).toBe(200);
-    expect(list.data.result.tools.map((t: any) => t.name).sort()).toEqual(["get_past_log", "search_past_logs"]);
+    expect(list.data.result.tools.map((t: any) => t.name).sort()).toEqual(["get_past_log", "search_past_logs", "search_past_logs_semantic"]);
     expect(list.data.result.tools.every((t: any) => t.annotations.readOnlyHint)).toBe(true);
     const search = await rpc("tools/call", {name: "search_past_logs", arguments: {query: "検索 Cloudflare"}});
     const hits = JSON.parse(search.data.result.content[0].text); expect(hits[0].id).toBe(doc.id);
