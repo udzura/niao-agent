@@ -12,7 +12,7 @@ final class ChatStore: ObservableObject {
     private var statisticsWritable = true
     @Published var agentSettings: AgentSettings?
     @Published var controlBusy = false
-    @Published var toolRunning = false
+    @Published var runningToolName: String?
     private var historyEpoch: Int?
     @Published var messages: [ChatMessage] = []
     @Published var usage: UsageSnapshot?
@@ -38,6 +38,7 @@ final class ChatStore: ObservableObject {
     private var authenticationBlocked = false
     private var retryAttempt = 0
     private var eventRevision = 0
+    private var settingsRevision = 0
     private let outboxURL: URL
 
     init() {
@@ -93,7 +94,7 @@ final class ChatStore: ObservableObject {
     private func disconnect() {
         generation = UUID()
         controlBusy = false
-        toolRunning = false
+        runningToolName = nil
         usageTask?.cancel(); usageTask = nil; usageLoading = false
         backend = nil
         loop?.cancel(); loop = nil
@@ -166,7 +167,7 @@ final class ChatStore: ObservableObject {
                 }
             } catch {
                 guard generation == id, !Task.isCancelled else { return }
-                connected = false; partial = nil; toolRunning = false; connection = "未接続"
+                connected = false; partial = nil; runningToolName = nil; connection = "未接続"
                 self.error = error.localizedDescription
                 heartbeat?.cancel(); heartbeat = nil
                 socket?.cancel(with: .goingAway, reason: nil); socket = nil
@@ -184,6 +185,7 @@ final class ChatStore: ObservableObject {
         var more = true
         while more {
             let revision = eventRevision
+            let settingsVersion = settingsRevision
             let page = try await backend.history(after: cursor, epoch: historyEpoch)
             guard generation == id, !Task.isCancelled else { throw CancellationError() }
             guard acceptEpoch(page.epoch ?? 0) else { continue }
@@ -191,10 +193,10 @@ final class ChatStore: ObservableObject {
             cursor = page.cursor
             // A response started before a socket event must not roll back its status.
             if eventRevision == revision {
-                agentSettings = page.settings
                 turns = page.turns
                 partial = page.active
             }
+            if settingsRevision == settingsVersion { agentSettings = page.settings }
             more = page.hasMore
         }
         if let pending = outbox, messages.contains(where: { $0.requestId == pending.requestId }) { clearOutbox() }
@@ -205,7 +207,11 @@ final class ChatStore: ObservableObject {
         eventRevision += 1
         switch event.type {
         case "tool_status":
-            toolRunning = event.status == "running"
+            if event.status == "running" {
+                runningToolName = event.name?.isEmpty == false ? event.name : "ツール"
+            } else if event.status == "completed", event.name == nil || event.name == runningToolName {
+                runningToolName = nil
+            }
             if let requestID = event.requestId, let name = event.name, let status = event.status {
                 let newCall = toolStatistics.observe(sessionID: toolSessionID, backend: backendURL, epoch: event.epoch ?? 0,
                                        requestID: requestID, name: name, status: status)
@@ -213,7 +219,9 @@ final class ChatStore: ObservableObject {
                 saveToolStatistics()
             }
         case "history_cleared": break // acceptEpoch already reset the local conversation.
-        case "settings_updated": agentSettings = event.settings
+        case "settings_updated":
+            settingsRevision += 1
+            agentSettings = event.settings
         case "accepted":
             if let message = event.message {
                 messages = mergeMessages(messages, [message])
@@ -224,7 +232,7 @@ final class ChatStore: ObservableObject {
         case "partial":
             if let requestID = event.requestId { partial = PartialMessage(requestId: requestID, text: event.text ?? "", thinking: event.thinking) }
         case "committed":
-            toolRunning = false
+            runningToolName = nil
             finishToolTurn(event)
             messages = mergeMessages(messages, event.messages ?? [])
             turns.removeAll { $0.requestId == event.requestId }
@@ -232,7 +240,7 @@ final class ChatStore: ObservableObject {
             if outbox?.requestId == event.requestId { clearOutbox() }
             refreshUsage()
         case "error":
-            toolRunning = false
+            runningToolName = nil
             finishToolTurn(event)
             refreshUsage()
             error = explanation(event.code ?? "unknown")
@@ -262,27 +270,37 @@ final class ChatStore: ObservableObject {
         if let current = historyEpoch, incoming < current { return false }
         if let current = historyEpoch, incoming > current {
             messages = []; turns = []; partial = nil; cursor = 0; draft = ""
+            runningToolName = nil
             toolToast.clear()
         }
         historyEpoch = incoming
         if let pending = outbox, (pending.epoch ?? 0) != incoming { clearOutbox() }
         return true
     }
-    func updateModelSettings(_ modelId: String, thinkingMode: ThinkingMode) {
+    func updateModelSettings(_ modelId: String) {
+        updateAgentSettings(ModelSettingsUpdate(modelId: modelId))
+    }
+    func updateThinking(_ choice: ThinkingChoice) {
+        guard let settings = agentSettings, choice != .custom else { return }
+        updateAgentSettings(choice.update(using: settings.thinkingPolicy))
+    }
+    private func updateAgentSettings(_ update: ModelSettingsUpdate) {
         guard connected, !controlBusy, let backend else { return }
         controlBusy = true
         let id = generation
-        let revision = eventRevision
+        let revision = settingsRevision
         Task {
             defer { if generation == id { controlBusy = false } }
             do {
-                let settings = try await backend.updateModelSettings(modelId, thinkingMode: thinkingMode)
+                let settings = try await backend.updateModelSettings(update)
                 guard generation == id else { return }
-                if eventRevision == revision { agentSettings = settings }
+                if settingsRevision == revision { agentSettings = settings }
                 error = nil
             } catch {
                 guard generation == id else { return }
                 self.error = error.localizedDescription
+                // A lost response may still have saved the selection. Sync before sending.
+                reconnect()
             }
         }
     }

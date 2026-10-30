@@ -32,13 +32,17 @@ struct ChatView: View {
                             if let failed = store.turns.first(where: { $0.requestId == message.requestId && $0.status == "failed" }), message.role == "user" {
                                 HStack {
                                     Text(explanation(failed.errorCode ?? "unknown")).font(.caption).foregroundStyle(.secondary)
-                                    Button("再試行") { store.retry(message) }.disabled(!store.connected || store.busy || store.outbox != nil)
+                                    Button("再試行") { store.retry(message) }.disabled(!store.connected || store.busy || store.controlBusy || store.outbox != nil)
                                 }
                             }
                         }
                         if store.busy {
                             VStack(alignment: .leading, spacing: 8) {
-                                HStack { ProgressView().controlSize(.small); Text(store.toolRunning ? "Niao · Rubyで計算中" : "Niao · 生成中").font(.caption).foregroundStyle(.secondary) }
+                                HStack {
+                                    ProgressView().controlSize(.small)
+                                    Text(verbatim: store.runningToolName.map { "Niao · \($0) を実行中" } ?? "Niao · 生成中")
+                                        .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                                }
                                 ThinkingDisclosureView(segments: store.partial?.thinking ?? [])
                                 if let text = store.partial?.text, !text.isEmpty { ChatMarkdownView(content: text) }
                             }.padding(12).frame(maxWidth: .infinity, alignment: .leading)
@@ -55,7 +59,7 @@ struct ChatView: View {
                 HStack {
                     Text("送信確認待ち: \(pending.content)").font(.caption).lineLimit(2)
                     Spacer()
-                    Button("再送") { store.resendOutbox() }.disabled(!store.connected || store.busy)
+                    Button("再送") { store.resendOutbox() }.disabled(!store.connected || store.busy || store.controlBusy)
                     Button("破棄") { store.discardOutbox() }
                 }.padding(12).background(.quaternary)
             }
@@ -68,13 +72,32 @@ struct ChatView: View {
                 }.foregroundStyle(.orange).padding(12)
             }
             Divider()
-            HStack(alignment: .bottom, spacing: 12) {
-                TextField("メッセージを入力", text: $store.draft, axis: .vertical)
-                    .lineLimit(1...6).textFieldStyle(.plain).focused($inputFocused)
-                    .onSubmit { store.send() }
-                Button { store.send(); inputFocused = true } label: { Image(systemName: "arrow.up.circle.fill").font(.title2) }
-                    .buttonStyle(.plain).disabled(!store.canSend).keyboardShortcut(.return, modifiers: .command)
-                    .help("送信 (⌘Return)")
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    Picker("Thinking", selection: Binding(
+                        get: { store.agentSettings?.thinkingChoice ?? .off },
+                        set: { store.updateThinking($0) }
+                    )) {
+                        ForEach(ThinkingChoice.allCases.filter { $0 != .custom || store.agentSettings?.thinkingChoice == .custom }) { choice in
+                            Text(choice.label).tag(choice).disabled(choice == .custom)
+                        }
+                    }
+                    .pickerStyle(.menu).controlSize(.small).fixedSize()
+                    .disabled(!store.connected || store.controlBusy ||
+                              store.agentSettings?.models.first(where: { $0.id == store.agentSettings?.modelId })?.supportsThinking != true)
+                    .help("自動の3段階はThinkingを使う頻度です。変更は即時保存し、次のターンから適用します。判定失敗時はONになります。")
+                    if store.controlBusy { ProgressView().controlSize(.mini) }
+                    Spacer()
+                    Text("次のターンから適用").font(.caption).foregroundStyle(.secondary)
+                }
+                HStack(alignment: .bottom, spacing: 12) {
+                    TextField("メッセージを入力", text: $store.draft, axis: .vertical)
+                        .lineLimit(1...6).textFieldStyle(.plain).focused($inputFocused)
+                        .onSubmit { store.send() }
+                    Button { store.send(); inputFocused = true } label: { Image(systemName: "arrow.up.circle.fill").font(.title2) }
+                        .buttonStyle(.plain).disabled(!store.canSend).keyboardShortcut(.return, modifiers: .command)
+                        .help("送信 (⌘Return)")
+                }
             }.padding(16)
         }
         .alert("チャット履歴を削除しますか？", isPresented: $confirmClear) {
@@ -107,7 +130,6 @@ struct SettingsView: View {
     @State private var token = ""
     @State private var credentialBusy = false
     @State private var selectedModel = ""
-    @State private var thinkingMode: ThinkingMode = .off
     @State private var error: String?
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -126,18 +148,14 @@ struct SettingsView: View {
                 Picker("モデル", selection: $selectedModel) {
                     ForEach(settings.models) { model in Text(model.name).tag(model.id) }
                 }
-                Picker("Thinking", selection: $thinkingMode) {
-                    ForEach(ThinkingMode.allCases) { mode in Text(mode.label).tag(mode) }
-                }
-                    .disabled(settings.models.first(where: { $0.id == selectedModel })?.supportsThinking != true)
-                Text("Gemma 4で利用できます。自動ではClef-flashが会話から判定します。判定にも時間・使用量が発生します。")
+                Text("Thinkingはチャットの入力欄から変更できます。Gemma 4で利用でき、自動判定にはClef-flashの時間・使用量が発生します。")
                     .font(.caption).foregroundStyle(.secondary)
                 HStack {
                     Text("変更後の推論から適用されます。").font(.caption).foregroundStyle(.secondary)
                     Spacer()
-                    Button("モデル設定を保存") { store.updateModelSettings(selectedModel, thinkingMode: thinkingMode) }
+                    Button("モデル設定を保存") { store.updateModelSettings(selectedModel) }
                         .disabled(!store.connected || store.controlBusy || selectedModel.isEmpty ||
-                                  (selectedModel == settings.modelId && thinkingMode == settings.thinkingMode))
+                                  selectedModel == settings.modelId)
                 }
             }
             if let error = error ?? store.error { Text(error).font(.caption).foregroundStyle(.red) }
@@ -156,12 +174,10 @@ struct SettingsView: View {
         }.padding(24).frame(width: 480)
         .onAppear {
             selectedModel = store.agentSettings?.modelId ?? ""
-            thinkingMode = store.agentSettings?.thinkingMode ?? .off
             url = store.backendURL
         }
         .task { await loadToken() }
         .onChange(of: store.agentSettings?.modelId) { _, value in selectedModel = value ?? "" }
-        .onChange(of: store.agentSettings?.thinkingMode) { _, value in thinkingMode = value ?? .off }
         .onChange(of: url) { _, value in
             guard value != store.backendURL else { return }
             // Reading a saved credential is explicit; don't prompt on every keystroke.

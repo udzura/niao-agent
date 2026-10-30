@@ -86,17 +86,20 @@ export class NiaoAgent extends Agent<Env> {
         if (text.length > 1024) return this.json({code: "invalid_settings"}, 400);
         body = JSON.parse(text);
       } catch { return this.json({code: "invalid_settings"}, 400); }
-      if (!body || !isModelID(body.modelId)) return this.json({code: "unsupported_model"}, 400);
+      if (!body || typeof body !== "object" || Array.isArray(body) ||
+        ![body.modelId,body.thinkingMode,body.thinkingEnabled,body.thinkingPolicy].some(value => value !== undefined)) return this.json({code:"invalid_settings"},400);
+      if (body.modelId !== undefined && !isModelID(body.modelId)) return this.json({code: "unsupported_model"}, 400);
       if (body.thinkingEnabled !== undefined && typeof body.thinkingEnabled !== "boolean") return this.json({code: "invalid_settings"}, 400);
       if (body.thinkingMode !== undefined && (!isThinkingMode(body.thinkingMode) || body.thinkingEnabled !== undefined)) return this.json({code:"invalid_settings"},400);
       const current = this.settings();
+      const modelId = body.modelId === undefined ? current.modelId : body.modelId as ModelID;
       const mode = (body.thinkingMode as ThinkingMode | undefined) ??
         (body.thinkingEnabled === undefined ? current.thinkingMode : body.thinkingEnabled ? "on" : "off");
       let policy: ThinkingPolicy;
       try { policy = body.thinkingPolicy === undefined ? current.thinkingPolicy : thinkingPolicy(body.thinkingPolicy,current.thinkingPolicy); }
       catch { return this.json({code:"invalid_settings"},400); }
-      // Keep the legacy boolean for rollback/old clients; model-only updates preserve auto.
-      this.sql`UPDATE niao_settings SET modelId = ${body.modelId}, thinkingEnabled = ${mode === "on" ? 1 : 0},
+      // Omitted fields retain their server values, including thinking-only composer updates.
+      this.sql`UPDATE niao_settings SET modelId = ${modelId}, thinkingEnabled = ${mode === "on" ? 1 : 0},
         thinkingMode = ${mode}, thinkingPolicy = ${JSON.stringify(policy)} WHERE id = 1`;
       this.publish({type: "settings_updated", settings: this.settingsResponse()});
       return this.json(this.settingsResponse());

@@ -169,6 +169,53 @@ enum ThinkingMode: String, Codable, CaseIterable, Identifiable {
         switch self { case .automatic: "自動"; case .on: "常にON"; case .off: "常にOFF" }
     }
 }
+struct ThinkingPolicy: Codable, Equatable {
+    var offThreshold: Double
+    var onThreshold: Double
+    var ambiguity: String
+    var timeoutMs: Int
+    static let standard = ThinkingPolicy(offThreshold: 0.35, onThreshold: 0.65, ambiguity: "on", timeoutMs: 3000)
+}
+
+enum ThinkingChoice: String, CaseIterable, Identifiable {
+    case automaticSelective, automatic, automaticFrequent, on, off, custom
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .automaticSelective: "自動（控えめ）"
+        case .automatic: "自動（標準）"
+        case .automaticFrequent: "自動（多め）"
+        case .on: "常にON"
+        case .off: "常にOFF"
+        case .custom: "自動（カスタム）"
+        }
+    }
+    private var thresholds: (Double, Double)? {
+        switch self {
+        case .automaticSelective: (0.65, 0.85)
+        case .automatic: (0.35, 0.65)
+        case .automaticFrequent: (0.15, 0.45)
+        default: nil
+        }
+    }
+    static func current(mode: ThinkingMode, policy: ThinkingPolicy) -> Self {
+        if mode == .on { return .on }
+        if mode == .off { return .off }
+        return allCases.first { choice in
+            guard let (off, on) = choice.thresholds else { return false }
+            return policy.offThreshold == off && policy.onThreshold == on && policy.ambiguity == "on"
+        } ?? .custom
+    }
+    func update(using policy: ThinkingPolicy) -> ModelSettingsUpdate {
+        if let (off, on) = thresholds {
+            var next = policy
+            next.offThreshold = off; next.onThreshold = on; next.ambiguity = "on"
+            return ModelSettingsUpdate(thinkingMode: .automatic, thinkingPolicy: next)
+        }
+        // Manual modes retain the last automatic policy for the next switch back.
+        return ModelSettingsUpdate(thinkingMode: self == .on ? .on : self == .off ? .off : .automatic)
+    }
+}
 struct AgentSettings: Decodable {
     struct Model: Decodable, Identifiable {
         let id: String
@@ -178,19 +225,26 @@ struct AgentSettings: Decodable {
     let v: Int
     let modelId: String
     let thinkingMode: ThinkingMode
+    let thinkingPolicy: ThinkingPolicy
+    var thinkingChoice: ThinkingChoice { .current(mode: thinkingMode, policy: thinkingPolicy) }
     var thinkingEnabled: Bool { thinkingMode == .on }
     let epoch: Int
     let models: [Model]
-    private enum CodingKeys: String, CodingKey { case v, modelId, thinkingMode, thinkingEnabled, epoch, models }
+    private enum CodingKeys: String, CodingKey { case v, modelId, thinkingMode, thinkingPolicy, thinkingEnabled, epoch, models }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         v = try values.decode(Int.self, forKey: .v)
         modelId = try values.decode(String.self, forKey: .modelId)
         if let mode = try values.decodeIfPresent(ThinkingMode.self, forKey: .thinkingMode) { thinkingMode = mode }
         else { thinkingMode = try values.decodeIfPresent(Bool.self, forKey: .thinkingEnabled) == true ? .on : .off }
+        thinkingPolicy = try values.decodeIfPresent(ThinkingPolicy.self, forKey: .thinkingPolicy) ?? .standard
         epoch = try values.decode(Int.self, forKey: .epoch)
         models = try values.decode([Model].self, forKey: .models)
     }
 }
-struct ModelSettingsUpdate: Encodable { let modelId: String; let thinkingMode: ThinkingMode }
+struct ModelSettingsUpdate: Encodable {
+    var modelId: String? = nil
+    var thinkingMode: ThinkingMode? = nil
+    var thinkingPolicy: ThinkingPolicy? = nil
+}
 struct ClearHistoryResult: Decodable { let v: Int; let epoch: Int }

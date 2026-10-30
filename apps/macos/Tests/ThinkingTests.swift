@@ -27,8 +27,45 @@ final class ThinkingTests: XCTestCase {
         let settings = #"{"v":1,"epoch":0,"modelId":"gemma","thinkingMode":"auto","thinkingEnabled":false,"models":[]}"#
         let decoded = try JSONDecoder().decode(AgentSettings.self,from:Data(settings.utf8))
         XCTAssertEqual(decoded.thinkingMode, .automatic)
+        XCTAssertEqual(decoded.thinkingPolicy, .standard)
+        XCTAssertEqual(decoded.thinkingChoice, .automatic)
         let history = "{\"v\":1,\"messages\":[],\"cursor\":0,\"hasMore\":false,\"turns\":[],\"active\":null,\"settings\":\(settings)}"
         XCTAssertEqual(try JSONDecoder().decode(HistoryPage.self,from:Data(history.utf8)).settings?.thinkingMode,.automatic)
+    }
+    func testComposerPresetsUseDistinctThresholdsAndKeepTheJudgeTimeout() throws {
+        let existing = ThinkingPolicy(offThreshold: 0.2, onThreshold: 0.8, ambiguity: "off", timeoutMs: 1500)
+        let presets: [(ThinkingChoice, Double, Double)] = [
+            (.automaticSelective, 0.65, 0.85), (.automatic, 0.35, 0.65), (.automaticFrequent, 0.15, 0.45)
+        ]
+        for (choice, off, on) in presets {
+            let update = choice.update(using: existing)
+            XCTAssertEqual(update.thinkingMode, .automatic)
+            let policy = try XCTUnwrap(update.thinkingPolicy)
+            XCTAssertEqual(policy.offThreshold, off)
+            XCTAssertEqual(policy.onThreshold, on)
+            XCTAssertEqual(policy.ambiguity, "on")
+            XCTAssertEqual(policy.timeoutMs, 1500)
+            XCTAssertEqual(ThinkingChoice.current(mode: .automatic, policy: policy), choice)
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(update)) as? [String: Any])
+            XCTAssertNil(body["modelId"]) // A thinking change must not overwrite the model.
+            XCTAssertEqual(body["thinkingMode"] as? String, "auto")
+        }
+        for choice in [ThinkingChoice.on, .off] {
+            XCTAssertNil(choice.update(using: existing).thinkingPolicy)
+            XCTAssertEqual(ThinkingChoice.current(mode: choice == .on ? .on : .off, policy: existing), choice)
+        }
+        XCTAssertEqual(ThinkingChoice.current(mode: .automatic, policy: existing), .custom)
+        // Model-only changes leave the thinking selection and custom API policy alone.
+        let modelOnly = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(ModelSettingsUpdate(modelId: "glm"))) as? [String: Any])
+        XCTAssertEqual(Set(modelOnly.keys), ["modelId"])
+    }
+    func testSavedPresetRestoresThroughSettingsEvents() throws {
+        let raw = #"{"v":1,"type":"settings_updated","settings":{"v":1,"epoch":0,"modelId":"gemma","thinkingMode":"auto","thinkingPolicy":{"offThreshold":0.65,"onThreshold":0.85,"ambiguity":"on","timeoutMs":1500},"models":[]}}"#
+        let settings = try XCTUnwrap(JSONDecoder().decode(ServerEvent.self, from: Data(raw.utf8)).settings)
+        XCTAssertEqual(settings.thinkingChoice, .automaticSelective)
+        XCTAssertEqual(settings.thinkingPolicy.timeoutMs, 1500)
+        let custom = raw.replacingOccurrences(of: "0.65", with: "0.6")
+        XCTAssertEqual(try JSONDecoder().decode(ServerEvent.self, from: Data(custom.utf8)).settings?.thinkingChoice, .custom)
     }
     func testJudgeUsageIsIncludedOnceAndKeepsDurationSeparateFromNeurons() throws {
         let raw = #"{"v":1,"dayStart":"2026-10-29T00:00:00Z","dayEnd":"2026-10-30T00:00:00Z","asOf":"now","account":{"status":"not_configured","neurons":null,"queriedAt":null,"errorCode":null},"local":{"neurons":8.455,"attempts":3,"unmeasuredAttempts":0,"trackingSince":"now","judge":{"neurons":3.455,"attempts":1,"unmeasuredAttempts":0,"calculatedAttempts":1,"totalDurationMs":480,"timedAttempts":1}}}"#
