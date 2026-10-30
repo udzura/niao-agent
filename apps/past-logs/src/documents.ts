@@ -17,7 +17,7 @@ export class DocumentService {
     const row = await this.db.prepare(`SELECT ${columns} FROM documents WHERE id = ?`).bind(id).first<Row>();
     return row ? decode(row) : null;
   }
-  async upsert(input: unknown): Promise<Document> {
+  async upsert(input: unknown, preserveNewer = false): Promise<Document> {
     const doc = documentInput.parse(input);
     const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify([doc.source, doc.source_id])));
     const id = "doc_" + [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, "0")).join("");
@@ -27,11 +27,12 @@ export class DocumentService {
         body=excluded.body, created_at=excluded.created_at, updated_at=excluded.updated_at,
         indexed_at=excluded.indexed_at, metadata=excluded.metadata,
         search_title=excluded.search_title, search_body=excluded.search_body
+      ${preserveNewer ? "WHERE documents.updated_at IS NULL OR excluded.updated_at >= documents.updated_at" : ""}
       RETURNING ${columns}`)
       .bind(id, doc.source, doc.source_id, doc.url, doc.title, doc.body, doc.created_at ?? null,
         doc.updated_at ?? null, new Date().toISOString(), doc.metadata == null ? null : JSON.stringify(doc.metadata),
         indexTerms(doc.title), indexTerms(doc.body)).first<Row>();
-    return decode(row!);
+    return row ? decode(row) : (await this.get(id))!;
   }
   async update(id: string, input: unknown): Promise<Document> {
     const patch = documentUpdate.parse(input);

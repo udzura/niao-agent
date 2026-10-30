@@ -1,10 +1,11 @@
+import { CosenseSync, consumeBatch, type SyncBindings } from "./cosense-sync";
 import { z } from "zod";
 import { DocumentService } from "./documents";
 import { pastLogsMcp } from "./mcp";
 import { ApiError, idSchema, MAX_REQUEST_BYTES } from "./validation";
 import { SemanticIndex, type SemanticBindings } from "./semantic";
 
-export interface Env extends SemanticBindings {
+export interface Env extends SemanticBindings, SyncBindings {
   DB: D1Database;
   PAST_LOGS_ADMIN_TOKEN: string;
   PAST_LOGS_READ_TOKEN: string;
@@ -50,6 +51,8 @@ async function readJson(request: Request): Promise<unknown> {
   } finally { reader.releaseLock(); }
 }
 export default {
+  async scheduled(_controller: ScheduledController, env: Env) { await new CosenseSync(env).poll(); },
+  queue: consumeBatch,
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     try {
       const path = new URL(request.url).pathname;
@@ -66,6 +69,13 @@ export default {
         if (path === "/api/semantic-index" && request.method === "GET") return json(await index.summary());
         if (path.endsWith("/reindex") && request.method === "POST") return json(await index.reindex(await readJson(request)));
         return json({error: {code: "method_not_allowed", message: "Method not allowed"}}, 405);
+      }
+      if (path === "/api/cosense-sync" || path === "/api/cosense-sync/backfill") {
+        await authorize(request, env, true);
+        const sync = new CosenseSync(env);
+        if (path.endsWith("/backfill") && request.method === "POST") return json(await sync.backfill(await readJson(request)));
+        if (path === "/api/cosense-sync" && request.method === "GET") return json(await sync.health());
+        return json({error:{code:"method_not_allowed"}},405);
       }
       const match = /^\/api\/documents(?:\/(doc_[a-f0-9]{64}))?$/.exec(path);
       if (!match) return json({error: {code: "not_found", message: "Not found"}}, 404);

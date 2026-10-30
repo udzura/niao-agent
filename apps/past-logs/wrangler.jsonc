@@ -34,11 +34,62 @@
   ],
   "observability": {
     "logs": {
-      "enabled": false
+      "enabled": true,
+      "invocation_logs": true
     }
+  },
+  "triggers": {
+    "crons": [
+      "0 * * * *"
+    ]
+  },
+  "vars": {
+    "COSENSE_PROJECT_NAME": "udzura-lofi-memo",
+    "COSENSE_SYNC_ENABLED": "true"
+  },
+  "queues": {
+    "producers": [
+      {
+        "binding": "COSENSE_SYNC_QUEUE",
+        "queue": "niao-cosense-sync"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "niao-cosense-sync",
+        "max_batch_size": 1,
+        "max_concurrency": 1,
+        "max_retries": 5,
+        "dead_letter_queue": "niao-cosense-sync-dlq"
+      }
+    ]
   },
   "env": {
     "development": {
+      "triggers": {
+        "crons": []
+      },
+      "vars": {
+        "COSENSE_PROJECT_NAME": "udzura-lofi-memo",
+        "COSENSE_SYNC_ENABLED": "false"
+      },
+      "queues": {
+        "producers": [
+          {
+            "binding": "COSENSE_SYNC_QUEUE",
+            "queue": "niao-cosense-sync-dev"
+          }
+        ],
+        "consumers": [
+          {
+            "queue": "niao-cosense-sync-dev",
+            "max_batch_size": 1,
+            "max_concurrency": 1,
+            "max_retries": 5,
+            "dead_letter_queue": "niao-cosense-sync-dev-dlq"
+          }
+        ]
+      },
       "ai": {
         "binding": "AI",
         "remote": true

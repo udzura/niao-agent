@@ -46,3 +46,7 @@ Later phases can add discovery, scheduling, memory, or tools without moving thes
 24. Dual-store indexing needs a recoverable application contract: atomically queue the desired revision in the canonical database, track planned external IDs before writes, preserve batch progress, and distinguish mutation acknowledgement from visibility. Revision-fenced hydration prevents stale/deleted source text from leaking through eventually consistent vector results.
 25. Leases and await deadlines do not preempt an external RPC or create a distributed transaction. Keep reconciliation IDs/tombstones, support explicit repair/rebuild, and document residual physical-orphan/storage limits. Test delayed visibility, interruption, concurrent edits, and deletion/recreation. When starting with an empty archive, omit article backfill and use mutation-triggered indexing from the first import.
 26. Embedding adapters should distinguish query instructions from document inputs and validate dimensions/finite values. Bound chunks, batching and outputs; preserve Unicode offsets for source excerpts. Explicit deterministic fixtures validate orchestration, while live multilingual retrieval quality requires the real model/index.
+
+## RSSからの検索用アーカイブ同期
+
+原本・発見・配送・索引を分離すると、Agentランタイムやチャットの状態を使わず同期できる。RSSのURL/GUIDを安定IDにせず、最新ページAPIでIDを解決する。D1に候補を保存してからQueueへ送り、送信成功の記録とackは別にする。重複配送、改名、文書保存後のembedding失敗に備え、取り込みサービスと索引の進捗を再利用する。Free環境ではページ数と同時実行を制限し、CPU時間・外部モデルの割当はビルド成功とは別に検証する必要がある。

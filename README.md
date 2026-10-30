@@ -225,3 +225,5 @@ bash apps/macos/scripts/smoke.sh <previous-request-id>
 ```
 
 詳しい実行結果・未確認項目は [検証記録](docs/verification.md)、設計は [architecture.md](docs/architecture.md)、通信仕様は [protocol.md](docs/protocol.md) を参照してください。
+
+Cosenseの定期同期・Queue・初回同期の設定は [自動同期](docs/cosense-sync.md) を参照してください。
