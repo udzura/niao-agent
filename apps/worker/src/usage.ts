@@ -25,7 +25,7 @@ export function utcDay(now: Date) {
 export function validNeurons(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0;
 }
-class AnalyticsError extends Error {}
+export class AnalyticsError extends Error {}
 export function parseAccountNeurons(value: unknown): number {
   const data = value as { errors?: unknown[]; data?: { viewer?: { accounts?: Array<{aiInferenceAdaptiveGroups?: Array<{sum?: {totalNeurons?: unknown}}>}> } } };
   if (!data || (data.errors && (!Array.isArray(data.errors) || data.errors.length))) throw new AnalyticsError("analytics_rejected");
@@ -62,47 +62,67 @@ export class UsageAnalytics {
   }
   private async query(now: Date): Promise<AccountUsage> {
     const {dayStart} = utcDay(now);
-    let phase = "configuration";
-    let httpStatus: number | undefined;
-    const started = Date.now();
-    try {
-      if (!/^[a-f0-9]{32}$/i.test(this.env.CF_ACCOUNT_ID!)) throw new AnalyticsError("analytics_configuration_invalid");
-      phase = "fetch";
-      const response = await this.request("https://api.cloudflare.com/client/v4/graphql", {
-        // Workers supports follow/manual only. Never follow a redirect with this credential.
-        method: "POST", redirect: "manual", signal: AbortSignal.timeout(8_000),
-        headers: {"Content-Type": "application/json", Authorization: `Bearer ${this.env.CF_ANALYTICS_TOKEN}`},
-        body: JSON.stringify({query: USAGE_QUERY, variables: {account: this.env.CF_ACCOUNT_ID, start: dayStart, end: now.toISOString()}}),
-      });
-      httpStatus = response.status;
-      if (!response.ok) {
-        await response.body?.cancel();
-        throw new AnalyticsError(response.status === 429 ? "analytics_rate_limited" : `analytics_http_${response.status}`);
-      }
-      phase = "decode";
-      const body = await response.json();
-      phase = "graphql";
-      return {status: "available", neurons: parseAccountNeurons(body), queriedAt: now.toISOString(), errorCode: null};
-    } catch (error) {
-      const name = error instanceof Error ? error.name : "UnknownError";
-      const code = error instanceof AnalyticsError ? error.message
-        : name === "TimeoutError" || name === "AbortError" ? "analytics_timeout"
-        : phase === "decode" ? "analytics_invalid_json" : "analytics_fetch_failed";
-      // No headers, query variables, stack traces or upstream response bodies.
-      // Fetch/runtime messages help diagnose e.g. Illegal invocation; redact secrets
-      // and identifiers before truncating, including encoded representations.
-      const redact = (value: string) => {
-        for (const secret of [this.env.CF_ANALYTICS_TOKEN, this.env.CF_ACCOUNT_ID]) {
-          if (secret) for (const variant of [secret, encodeURIComponent(secret), JSON.stringify(secret).slice(1,-1)]) {
-            value = value.split(variant).join("[redacted]");
-          }
-        }
-        return value.replace(/Bearer\s+[^\s"']+/gi, "Bearer [redacted]").replace(/[\r\n\t]/g," ").slice(0,500);
-      };
-      console.warn(JSON.stringify({event:"analytics.error",code,phase,httpStatus,durationMs:Date.now()-started,
-        errorType:redact(name),message:redact(error instanceof Error ? error.message : "Non-Error exception")}));
-      return {status: "unavailable", neurons: null, queriedAt: null,
-        errorCode: code};
+    const result = await readCloudflare(this.env, this.request, now, {
+      path: "graphql", operation: "neurons", parse: parseAccountNeurons,
+      body: {query: USAGE_QUERY, variables: {account: this.env.CF_ACCOUNT_ID, start: dayStart, end: now.toISOString()}},
+    });
+    const {data, ...status} = result;
+    return {...status, neurons: data};
+  }
+}
+
+export interface AnalyticsResult<T> {
+  status: "available" | "not_configured" | "unavailable";
+  data: T | null;
+  queriedAt: string | null;
+  errorCode: string | null;
+}
+// Fixed Cloudflare API paths supplied by server code, never by a client request.
+export async function readCloudflare<T>(env: AnalyticsEnv, request: typeof fetch, now: Date,
+  options: {path: string; operation: string; body?: unknown; signal?: AbortSignal; parse: (body: unknown) => T}): Promise<AnalyticsResult<T>> {
+  if (!env.CF_ACCOUNT_ID || !env.CF_ANALYTICS_TOKEN) {
+    return {status: "not_configured", data: null, queriedAt: null, errorCode: "analytics_not_configured"};
+  }
+  let phase = "configuration";
+  let httpStatus: number | undefined;
+  const started = Date.now();
+  try {
+    if (!/^[a-f0-9]{32}$/i.test(env.CF_ACCOUNT_ID!)) throw new AnalyticsError("analytics_configuration_invalid");
+    phase = "fetch";
+    const response = await request(`https://api.cloudflare.com/client/v4/${options.path}`, {
+      // Workers supports follow/manual only. Never follow a redirect with this credential.
+      method: options.body === undefined ? "GET" : "POST", redirect: "manual", signal: options.signal ?? AbortSignal.timeout(8_000),
+      headers: {"Content-Type": "application/json", Authorization: `Bearer ${env.CF_ANALYTICS_TOKEN}`},
+      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+    });
+    httpStatus = response.status;
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new AnalyticsError(response.status === 429 ? "analytics_rate_limited" : `analytics_http_${response.status}`);
     }
+    phase = "decode";
+    const body = await response.json();
+    phase = options.body === undefined ? "api" : "graphql";
+    return {status: "available", data: options.parse(body), queriedAt: now.toISOString(), errorCode: null};
+  } catch (error) {
+    const name = error instanceof Error ? error.name : "UnknownError";
+    const code = error instanceof AnalyticsError ? error.message
+      : name === "TimeoutError" || name === "AbortError" ? "analytics_timeout"
+      : phase === "decode" ? "analytics_invalid_json" : "analytics_fetch_failed";
+    // No headers, query variables, stack traces or upstream response bodies.
+    // Fetch/runtime messages help diagnose e.g. Illegal invocation; redact secrets
+    // and identifiers before truncating, including encoded representations.
+    const redact = (value: string) => {
+      for (const secret of [env.CF_ANALYTICS_TOKEN, env.CF_ACCOUNT_ID]) {
+        if (secret) for (const variant of [secret, encodeURIComponent(secret), JSON.stringify(secret).slice(1,-1)]) {
+          value = value.split(variant).join("[redacted]");
+        }
+      }
+      return value.replace(/Bearer\s+[^\s"']+/gi, "Bearer [redacted]").replace(/[\r\n\t]/g," ").slice(0,500);
+    };
+    console.warn(JSON.stringify({event:"analytics.error",operation:options.operation,code,phase,httpStatus,durationMs:Date.now()-started,
+      errorType:redact(name),message:redact(error instanceof Error ? error.message : "Non-Error exception")}));
+    return {status: "unavailable", data: null, queriedAt: null,
+      errorCode: code};
   }
 }

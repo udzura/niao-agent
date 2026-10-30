@@ -19,7 +19,7 @@ export default {
     const url = new URL(request.url);
     if (url.pathname === "/health" && request.method === "GET") return Response.json({ok: true, protocol: 1}, {headers: {"Cache-Control": "no-store"}});
     // One identity only; arbitrary URLs must not create additional billable agents.
-    if (!["/agents/niao-agent/personal", "/agents/niao-agent/personal/history", "/agents/niao-agent/personal/usage", "/agents/niao-agent/personal/settings"].includes(url.pathname)) return new Response("Not found", {status: 404});
+    if (!["/agents/niao-agent/personal", "/agents/niao-agent/personal/history", "/agents/niao-agent/personal/usage", "/agents/niao-agent/personal/platform-usage", "/agents/niao-agent/personal/settings"].includes(url.pathname)) return new Response("Not found", {status: 404});
     const allowed = url.pathname.endsWith("/settings") ? ["GET", "PUT"]
       : url.pathname.endsWith("/history") ? ["GET", "DELETE"] : ["GET"];
     if (!allowed.includes(request.method)) return new Response("Method not allowed", {status: 405, headers: {Allow: allowed.join(", ")}});

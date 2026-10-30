@@ -74,6 +74,11 @@ final class Backend {
         guard usage.v == 1 else { throw NiaoError.protocolMismatch }
         return usage
     }
+    func platformUsage() async throws -> PlatformUsageSnapshot {
+        let snapshot: PlatformUsageSnapshot = try await controlRequest(path: "/agents/niao-agent/personal/platform-usage", method: "GET")
+        guard snapshot.v == 1 else { throw NiaoError.protocolMismatch }
+        return snapshot
+    }
     func socket() -> URLSessionWebSocketTask {
         let task = session.webSocketTask(with: request(path: "/agents/niao-agent/personal", websocket: true))
         task.maximumMessageSize = 1_000_000

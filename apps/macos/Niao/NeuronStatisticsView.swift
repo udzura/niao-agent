@@ -25,6 +25,8 @@ struct NeuronStatisticsView: View {
                                 Text("前回取得値を表示しています。").font(.caption).foregroundStyle(.secondary)
                             }
                         }
+                        NeuronBudgetChart(used: usage.displayedNeurons, accountAvailable: usage.accountAvailable,
+                                          current: usage.isCurrent(at: timeline.date))
                         if let message = usage.configurationMessage { Text(message).font(.callout).foregroundStyle(.secondary) }
                         if usage.accountAvailable {
                             Text("アカウント内の他のアプリ・モデルの使用量も含みます。確定請求額や残り利用可能量ではありません。")
@@ -38,6 +40,18 @@ struct NeuronStatisticsView: View {
                                     LabeledContent("使用量未取得", value: "\(usage.local.unmeasuredAttempts) 回")
                                     Text("実行中・失敗・中断などの使用量は未取得です。記録値は総使用量を下回る場合があります。")
                                         .font(.caption).foregroundStyle(.secondary)
+                                }
+                                if let judge = usage.local.judge, usage.local.neurons > 0 {
+                                    let share = min(1, max(0, judge.neurons / usage.local.neurons))
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        HStack {
+                                            Text("Thinking判定の割合")
+                                            Spacer()
+                                            Text(share.formatted(.percent.precision(.fractionLength(1)))).monospacedDigit()
+                                        }.font(.caption)
+                                        ProgressView(value: share).tint(.purple)
+                                            .accessibilityLabel("Niao記録分に占めるThinking判定の割合")
+                                    }
                                 }
                                 Text("記録機能の導入後のみ。他のアプリや導入前の利用は含みません。")
                                     .font(.caption).foregroundStyle(.secondary)
@@ -86,4 +100,49 @@ struct NeuronStatisticsView: View {
         return store.connected ? "「更新」から使用量を取得してください。" : "バックエンドに接続して使用量を更新してください。"
     }
     private func neurons(_ value: Double) -> String { value.formatted(.number.precision(.fractionLength(0...2))) }
+}
+
+
+struct NeuronBudgetChart: View {
+    let used: Double
+    let accountAvailable: Bool
+    let current: Bool
+    private let allowance: Double = 10_000
+    private var fraction: Double { max(0, used) / allowance }
+    private var color: Color { fraction >= 0.9 ? .red : fraction >= 0.75 ? .orange : .accentColor }
+    var body: some View {
+        GroupBox("1日の無料枠 · 10,000 Neurons") {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(fraction.formatted(.percent.precision(.fractionLength(1))))
+                        .font(.system(size: 32, weight: .semibold, design: .rounded)).monospacedDigit()
+                        .foregroundStyle(color)
+                    Text(accountAvailable ? "使用済み" : "Niao記録分のみ").font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                }
+                Gauge(value: min(1, fraction), in: 0...1) { Text("無料枠に対する使用率") }
+                    .gaugeStyle(.linearCapacity).tint(color)
+                    .accessibilityValue(fraction.formatted(.percent.precision(.fractionLength(1))))
+                HStack {
+                    Text("0")
+                    Spacer()
+                    Text("10,000 Neurons")
+                }.font(.caption).foregroundStyle(.secondary)
+                if accountAvailable {
+                    LabeledContent(used > allowance ? "無料枠を超えた量" : "無料枠の残り（目安）",
+                                   value: "\(abs(allowance - used).formatted(.number.precision(.fractionLength(0...2)))) Neurons")
+                        .font(.callout).monospacedDigit()
+                } else {
+                    Text("アカウント全体が未取得のため、全体の残量は算出できません。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if !current {
+                    Text("前回の集計日の値です。今日の残量ではありません。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Text("無料枠を基準にした比較です。Paidプランの利用上限ではありません。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }.padding(6).frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
 }

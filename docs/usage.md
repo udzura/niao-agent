@@ -4,6 +4,12 @@ Niao は Cloudflare の公式 GraphQL Analytics API を Worker から呼び、�
 
 メイン画面は当日の値と集計範囲のみを表示します。グラフボタン、またはメニューバーの「利用状況統計…」から開き、「Neurons」で内訳・Thinking判定の待ち時間・取得エラー・集計日時を確認できます。同じウィンドウから「ツール」の統計へ切り替えられます。
 
+統計画面では、日次無料枠10,000 Neuronsに対する使用率をバー表示し、75%以上で橙、90%以上で赤に変わります。100%を超えた割合も表示します。アカウント全体が取得できた場合だけ残りの目安（超過時は超過量）を表示し、Niao記録分しかない場合は全体の残量を算出しません。前の集計日の値は明示します。Paidプランの上限を示すグラフではありません。Niao記録分に占めるThinking判定の割合も表示します。
+
+ツール画面は呼び出し数の多い順の横棒グラフで、完了通知あり／未確認を色分けします。今回のセッション／全体の切り替えを維持し、全体では直近10セッションの回数も比較できます。棒の番号は古い順で、開始日時は下の一覧に表示します。完了通知は処理が戻った通知で、ツール自体の成功率ではありません。表示はSwiftUI・Swift Chartsを使用し、外部のUI依存や新しいサーバーAPIは追加しません。
+
+Workers／Durable Objectsの統計は[下記](#workersとdurable-objectsの日次利用量)を参照してください。
+
 ## 1. Analytics 読み取り用トークンを作る
 
 Cloudflare ダッシュボードの **Account API tokens** で **Create Token → Custom token / Get started** を選びます。
@@ -126,3 +132,68 @@ curl --silent --show-error \
 修正後のAPIで引き続き`analytics_unavailable`が返る場合は、旧バージョン・別URL・キャッシュの可能性を確認してください。前のfetch receiver修正だけで本番の問題が解消したことは未確認です。診断ログを取得して原因を特定します。
 
 Workersのfetchは`redirect:"error"`を受け付けません。Analyticsは`redirect:"manual"`とし、3xxも非成功レスポンスとして拒否します。`analytics_fetch_failed`のログに`Invalid redirect value`がある場合は、この互換性修正を含むAgentをデプロイしてください。
+
+## WorkersとDurable Objectsの日次利用量
+
+「利用状況統計」→「Workers」で、今日のUTC 0:00から現在までのアカウント全体の目安を表示します。Niao以外のWorkerも含みます。過去の日別履歴は保存しません。
+
+| 指標 | 公式GraphQLデータセット／フィールド | 比較するFree日次枠 |
+|---|---|---|
+| Workers & Pages Functionsのリクエスト | `workersInvocationsAdaptive.sum.requests` | 100,000リクエスト |
+| Durable Objectsの持続時間 | `durableObjectsPeriodicGroups.sum.duration` | 13,000 GB-s |
+
+`duration`はすでにGB-sです。`activeTime`（マイクロ秒）やCPU時間と混同せず、リクエストごとのwall timeも合計しません。持続時間は無料枠内の消費も含み、無料枠超過分だけを表す数値ではありません。Pagesの静的ファイルへのアクセスは含みません。Analyticsのリクエスト集計は課金・制限の厳密なカウンターではなく、内部呼び出しなどの扱いや反映遅延・サンプリングによりダッシュボードの請求用値と異なる場合があります。
+
+棒はFree枠を比較基準にしており、実際の残量保証ではありません。Paidの枠は月次のため、Paidと判定した場合は日次の比較バーが契約上限ではない旨を表示します。日付が変わった古い値は「前回の集計日」と表示します。
+
+### 権限とFreeプランの確認
+
+利用量には既存の`CF_ACCOUNT_ID`と`CF_ANALYTICS_TOKEN`を使用します。トークンの権限は対象アカウントの **Account → Account Analytics → Read** です。プランの自動確認には、同じトークンへ **Account → Billing → Read** を追加してください。書き込み権限は不要です。ローカル設定は`apps/worker/.dev.vars`、本番はWrangler secretsで管理します。
+
+プラン確認は公式の`GET /accounts/{account_id}/subscriptions`を使います。完全な契約一覧に有効なWorkers有料契約がない場合にWorkers Freeと推定します。`WORKERS_PAID`などの有効なWorkers契約があればPaidです。ゾーンのFree/Pro契約はWorkersのプラン判定に使いません。解約済みでも支払期間が残っていればPaidとして扱います。未知のWorkers契約・一覧の取得不完了・403などのエラーは「未確認」にし、Freeと断定しません。画面からCloudflareのWorkers & Pagesへ移動して確認することもできます。
+
+`Billing Read`がない場合でも利用量は表示できます。プラン欄の`analytics_http_403`と権限の案内を確認してください。Billing情報そのものやAPIトークンはアプリへ返しません。
+
+公式資料: [Workers GraphQL](https://developers.cloudflare.com/analytics/graphql-api/tutorials/querying-workers-metrics/)、[DO Analytics](https://developers.cloudflare.com/durable-objects/observability/metrics-and-analytics/)、[契約一覧APIと必要権限](https://developers.cloudflare.com/api/resources/accounts/subresources/subscriptions/methods/get/)、[Workers契約ID](https://developers.cloudflare.com/tenant/reference/subscriptions/)、[Workers料金](https://developers.cloudflare.com/workers/platform/pricing/)、[DO料金](https://developers.cloudflare.com/durable-objects/platform/pricing/)。
+
+### ローカルのトークンで実取得を確認する
+
+リポジトリルートから実行します（Node.js 22以降、`npm install`済み）。本番Workerをデプロイせずに、実装と同じクエリ・解析処理を使って公式APIを読み取ります。
+
+```sh
+node tools/check-platform-usage.mjs
+```
+
+環境変数を優先し、未指定時はGit対象外の`apps/worker/.dev.vars`から`CF_ACCOUNT_ID`と`CF_ANALYTICS_TOKEN`だけを使用します。出力は使用量・プラン判定・安全なエラーコードで、トークンやAccount IDは表示しません。いずれか取得不可なら終了コード1ですが、取得できた他の指標も表示します。
+
+2026-10-30の実確認では、既存のAnalyticsトークンでリクエスト数とDO持続時間を取得できました。契約一覧は当初403でしたが、同じトークンへのBilling Read追加後に取得でき、有効なWorkers有料契約なしからFreeと判定できました。
+
+### 本番への反映
+
+同じトークンの権限だけを編集した場合は、secretの値を再登録する必要はありません。トークンを再発行した場合だけ、先に更新します。
+
+```sh
+cd apps/worker
+# トークンを再発行した場合のみ（対話入力）:
+npx wrangler secret put CF_ANALYTICS_TOKEN
+# Agent Workerだけをデプロイ:
+npm run deploy
+```
+
+Ruby RunnerとPast Logsの再デプロイは不要です。macOSアプリは再ビルドし、起動し直してください。
+
+```sh
+# リポジトリルートで:
+npm run build:macos
+open apps/macos/build/Build/Products/Debug/Niao.app
+```
+
+アプリの出力先は`apps/macos/scripts/build.sh`に従います。デプロイ後のAPI確認:
+
+```sh
+curl --fail-with-body --silent --show-error \
+  -H "Authorization: Bearer $NIAO_TOKEN" \
+  "$NIAO_BACKEND_URL/agents/niao-agent/personal/platform-usage" | jq .
+```
+
+APIは既存と同じ認証を要求し、GETのみ許可します。`workers.requests`、`durableObjects.durationGbSeconds`、`plan.name`（`free`／`paid`／取得不可時`null`）を返し、それぞれに`status`、`queriedAt`、`errorCode`があります。各指標は独立して取得し、利用量は成功60秒・失敗15秒、プランは成功1時間・失敗15秒キャッシュします。APIの`asOf`はレスポンスの集計時刻で、実際の上流取得時刻は各`queriedAt`です。プラン権限追加直後の失敗キャッシュは15秒後に失効します。

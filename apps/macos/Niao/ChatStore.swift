@@ -19,6 +19,10 @@ final class ChatStore: ObservableObject {
     @Published var usageError: String?
     @Published var usageLoading = false
     private var usageTask: Task<Void, Never>?
+    @Published var platformUsage: PlatformUsageSnapshot?
+    @Published var platformUsageError: String?
+    @Published var platformUsageLoading = false
+    private var platformUsageTask: Task<Void, Never>?
     private var backend: Backend?
     private var usageRefreshAt: Date?
     @Published var draft = ""
@@ -86,6 +90,7 @@ final class ChatStore: ObservableObject {
         historyEpoch = nil; agentSettings = nil
         toolToast.clear()
         usage = nil; usageError = nil; usageRefreshAt = nil
+        platformUsage = nil; platformUsageError = nil
         reconnect()
     }
     func start() { if loop == nil { reconnect() } }
@@ -96,6 +101,7 @@ final class ChatStore: ObservableObject {
         controlBusy = false
         runningToolName = nil
         usageTask?.cancel(); usageTask = nil; usageLoading = false
+        platformUsageTask?.cancel(); platformUsageTask = nil; platformUsageLoading = false
         backend = nil
         loop?.cancel(); loop = nil
         heartbeat?.cancel(); heartbeat = nil
@@ -345,6 +351,27 @@ final class ChatStore: ObservableObject {
                 guard generation == id, !Task.isCancelled else { return }
                 // Usage errors must not disconnect an otherwise healthy chat.
                 usageError = "使用量を更新できませんでした。"; usageRefreshAt = Date()
+            }
+        }
+    }
+    func refreshPlatformUsage() {
+        guard platformUsageTask == nil, let backend else { return }
+        let id = generation
+        platformUsageLoading = true
+        platformUsageTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if generation == id { platformUsageTask = nil; platformUsageLoading = false }
+            }
+            do {
+                let snapshot = try await backend.platformUsage()
+                guard generation == id, !Task.isCancelled else { return }
+                platformUsage = snapshot; platformUsageError = nil
+            } catch {
+                guard generation == id, !Task.isCancelled else { return }
+                if case NiaoError.http(404) = error {
+                    platformUsageError = "Workers統計に対応したバックエンドをデプロイしてください。"
+                } else { platformUsageError = "Workersの使用量を更新できませんでした。" }
             }
         }
     }

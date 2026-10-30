@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { NiaoAgent } from "../src/niao-agent";
 import { ChatError } from "../src/protocol";
 import { ClefThinkingJudge } from "../src/thinking-policy";
+import { PlatformAnalytics } from "../src/platform-usage";
 
 const headers = {Authorization: "Bearer test-only-token-000000000000000000000000"};
 const base = "https://test/agents/niao-agent/personal";
@@ -53,7 +54,7 @@ async function history(after = 0) {
 
 describe("authenticated Worker boundary", () => {
   it("rejects unauthenticated HTTP and upgrades before allocating an agent", async () => {
-    for (const path of ["/health", "/agents/niao-agent/personal/usage", "/agents/niao-agent/personal/history", "/agents/niao-agent/personal"]) {
+    for (const path of ["/health", "/agents/niao-agent/personal/usage", "/agents/niao-agent/personal/platform-usage", "/agents/niao-agent/personal/history", "/agents/niao-agent/personal"]) {
       expect((await SELF.fetch(`https://test${path}`)).status).toBe(401);
       expect((await SELF.fetch(`https://test${path}`, {headers: {Upgrade: "websocket"}})).status).toBe(401);
     }
@@ -61,6 +62,24 @@ describe("authenticated Worker boundary", () => {
     expect((await SELF.fetch("https://test/health?token=anything")).status).toBe(401);
     expect((await SELF.fetch("https://test/agents/niao-agent/other", {headers})).status).toBe(404);
     expect((await SELF.fetch(base, {method: "POST", headers})).status).toBe(405);
+  });
+  it("serves platform usage through the authenticated Agent and keeps it read-only", async () => {
+    expect((await SELF.fetch(`${base}/platform-usage`, {method: "POST", headers})).status).toBe(405);
+    expect((await SELF.fetch(`${base}/platform-usage`, {headers: {...headers, Upgrade: "websocket"}})).status).toBe(404);
+    const unconfigured = await (await SELF.fetch(`${base}/platform-usage`, {headers})).json<any>();
+    expect(unconfigured.workers).toMatchObject({status: "not_configured", requests: null});
+    await runInDurableObject(await stub(), (agent: NiaoAgent) => {
+      (agent as any).platformAnalytics = new PlatformAnalytics({CF_ACCOUNT_ID: "a".repeat(32), CF_ANALYTICS_TOKEN: "test-token"}, async (url, init) => {
+        if (String(url).includes("/subscriptions")) return new Response(null, {status: 403});
+        const workers = String(init?.body).includes("workersInvocationsAdaptive");
+        return Response.json({data: {viewer: {accounts: [{[workers ? "workersInvocationsAdaptive" : "durableObjectsPeriodicGroups"]:
+          [{sum: workers ? {requests: 50} : {duration: 12.5}}]}]}}});
+      });
+    });
+    const response = await SELF.fetch(`${base}/platform-usage`, {headers});
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    expect(await response.json()).toMatchObject({v: 1, workers: {status: "available", requests: 50},
+      durableObjects: {status: "available", durationGbSeconds: 12.5}, plan: {status: "unavailable", name: null}});
   });
 });
 

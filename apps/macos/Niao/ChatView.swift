@@ -1,8 +1,11 @@
 import SwiftUI
+import AppKit
 
 struct ChatView: View {
     @ObservedObject var store: ChatStore
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var multiline = false
     @State private var confirmClear = false
     @FocusState private var inputFocused: Bool
     var body: some View {
@@ -72,33 +75,7 @@ struct ChatView: View {
                 }.foregroundStyle(.orange).padding(12)
             }
             Divider()
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 8) {
-                    Picker("Thinking", selection: Binding(
-                        get: { store.agentSettings?.thinkingChoice ?? .off },
-                        set: { store.updateThinking($0) }
-                    )) {
-                        ForEach(ThinkingChoice.allCases.filter { $0 != .custom || store.agentSettings?.thinkingChoice == .custom }) { choice in
-                            Text(choice.label).tag(choice).disabled(choice == .custom)
-                        }
-                    }
-                    .pickerStyle(.menu).controlSize(.small).fixedSize()
-                    .disabled(!store.connected || store.controlBusy ||
-                              store.agentSettings?.models.first(where: { $0.id == store.agentSettings?.modelId })?.supportsThinking != true)
-                    .help("自動の3段階はThinkingを使う頻度です。変更は即時保存し、次のターンから適用します。判定失敗時はONになります。")
-                    if store.controlBusy { ProgressView().controlSize(.mini) }
-                    Spacer()
-                    Text("次のターンから適用").font(.caption).foregroundStyle(.secondary)
-                }
-                HStack(alignment: .bottom, spacing: 12) {
-                    TextField("メッセージを入力", text: $store.draft, axis: .vertical)
-                        .lineLimit(1...6).textFieldStyle(.plain).focused($inputFocused)
-                        .onSubmit { store.send() }
-                    Button { store.send(); inputFocused = true } label: { Image(systemName: "arrow.up.circle.fill").font(.title2) }
-                        .buttonStyle(.plain).disabled(!store.canSend).keyboardShortcut(.return, modifiers: .command)
-                        .help("送信 (⌘Return)")
-                }
-            }.padding(16)
+            messageComposer
         }
         .alert("チャット履歴を削除しますか？", isPresented: $confirmClear) {
             Button("キャンセル", role: .cancel) {}
@@ -108,7 +85,179 @@ struct ChatView: View {
         }
         .sheet(isPresented: $store.settingsPresented) { SettingsView(store: store) }
     }
+    private var messageComposer: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ThinkingSlider(store: store)
+            HStack(alignment: .bottom, spacing: 12) {
+                if multiline {
+                    MultilineMessageInput(text: $store.draft, onSend: { store.send() })
+                        .frame(height: 150)
+                        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
+                        .overlay { RoundedRectangle(cornerRadius: 8).strokeBorder(.secondary.opacity(0.15)) }
+                        .transition(.opacity)
+                } else {
+                    TextField("メッセージを入力", text: $store.draft, axis: .vertical)
+                        .lineLimit(1...3).textFieldStyle(.plain).focused($inputFocused)
+                        .onSubmit { store.send() }
+                        .onKeyPress(keys: [.return], phases: .down) { press in
+                            guard press.modifiers == .command else { return .ignored }
+                            store.send()
+                            return .handled
+                        }
+                        .transition(.opacity)
+                }
+                Button { store.send(); inputFocused = true } label: { Image(systemName: "arrow.up.circle.fill").font(.title2) }
+                    .buttonStyle(.plain).disabled(!store.canSend).keyboardShortcut(.return, modifiers: .control)
+                    .help("送信 (Ctrl＋Enter / ⌘Return)")
+            }.clipped()
+            HStack {
+                Button {
+                    withAnimation(reduceMotion ? nil : .spring(response: 0.34, dampingFraction: 0.88)) {
+                        multiline.toggle()
+                    }
+                    if !multiline { Task { @MainActor in inputFocused = true } }
+                } label: {
+                    Label(multiline ? "入力欄を縮める" : "複数行で入力",
+                          systemImage: multiline ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                }.buttonStyle(.plain).font(.caption).foregroundStyle(.secondary)
+                .accessibilityValue(multiline ? "複数行モード" : "通常モード")
+                Spacer()
+                Text(multiline ? "Enterで改行 · Ctrl＋Enterで送信" : "Enterで送信")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }.padding(16)
+    }
+
 }
+// NSTextView keeps Return/IME handling native. Only an explicit modified Return sends.
+struct MultilineMessageInput: NSViewRepresentable {
+    @Binding var text: String
+    let onSend: () -> Void
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+    func makeNSView(context: Context) -> NSScrollView {
+        let scroll = NSScrollView()
+        scroll.hasVerticalScroller = true
+        scroll.drawsBackground = false
+        let editor = MessageTextView()
+        editor.isRichText = false
+        editor.isAutomaticQuoteSubstitutionEnabled = false
+        editor.isAutomaticDashSubstitutionEnabled = false
+        editor.font = .preferredFont(forTextStyle: .body)
+        editor.textColor = .labelColor
+        editor.drawsBackground = false
+        editor.textContainerInset = NSSize(width: 6, height: 8)
+        editor.isVerticallyResizable = true
+        editor.isHorizontallyResizable = false
+        editor.autoresizingMask = [.width]
+        editor.textContainer?.widthTracksTextView = true
+        editor.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
+        editor.allowsUndo = true
+        editor.setAccessibilityLabel("メッセージを入力（複数行）")
+        editor.string = text
+        editor.setSelectedRange(NSRange(location: (text as NSString).length, length: 0))
+        editor.delegate = context.coordinator
+        editor.onSend = onSend
+        scroll.documentView = editor
+        return scroll
+    }
+    func updateNSView(_ scroll: NSScrollView, context: Context) {
+        context.coordinator.parent = self
+        guard let editor = scroll.documentView as? MessageTextView else { return }
+        editor.onSend = onSend
+        if editor.string != text {
+            editor.string = text
+            editor.setSelectedRange(NSRange(location: (text as NSString).length, length: 0))
+        }
+    }
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        var parent: MultilineMessageInput
+        init(_ parent: MultilineMessageInput) { self.parent = parent }
+        func textDidChange(_ notification: Notification) {
+            if let editor = notification.object as? NSTextView { parent.text = editor.string }
+        }
+    }
+}
+final class MessageTextView: NSTextView {
+    var onSend: () -> Void = {}
+    private func isSend(_ event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting([.numericPad, .function])
+        return [36, 76].contains(event.keyCode) && (flags == .control || flags == .command)
+    }
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard isSend(event) else { return super.performKeyEquivalent(with: event) }
+        // Confirming a Japanese composition must never submit the draft.
+        if !hasMarkedText() { onSend() }
+        return true
+    }
+    override func keyDown(with event: NSEvent) {
+        if isSend(event) {
+            if !hasMarkedText() { onSend() }
+        } else { super.keyDown(with: event) }
+    }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, let window = self.window else { return }
+                window.makeFirstResponder(self)
+            }
+        }
+    }
+}
+
+// Keep the draft position local while dragging; save only the final choice.
+struct ThinkingSlider: View {
+    @ObservedObject var store: ChatStore
+    @State private var position: Double = 0
+    @State private var editing = false
+    private static let choices: [ThinkingChoice] = [.off, .automaticSelective, .automatic, .automaticFrequent, .on]
+    private var saved: ThinkingChoice { store.agentSettings?.thinkingChoice ?? .off }
+    private var selected: ThinkingChoice { Self.choices[min(4, max(0, Int(position.rounded())))] }
+    private var enabled: Bool {
+        store.connected && !store.controlBusy &&
+        store.agentSettings?.models.first(where: { $0.id == store.agentSettings?.modelId })?.supportsThinking == true
+    }
+    var body: some View {
+        HStack(spacing: 8) {
+            Text("OFF").font(.caption2).foregroundStyle(.secondary)
+            Slider(value: Binding(get: { position }, set: { value in
+                position = value
+                // Keyboard and accessibility adjustments can arrive outside a drag.
+                if !editing { save() }
+            }), in: 0...4, step: 1, onEditingChanged: { active in
+                editing = active
+                if !active { save() }
+            })
+            .controlSize(.small).frame(minWidth: 100, idealWidth: 200, maxWidth: 220)
+            .disabled(!enabled)
+            .accessibilityLabel("Thinking")
+            .accessibilityValue(editing ? selected.label : saved.label)
+            .help("左端は常にOFF、中央3段階は自動（控えめ・標準・多め）、右端は常にON。変更は次のターンから適用します。")
+            Text("ON").font(.caption2).foregroundStyle(.secondary)
+            HStack(spacing: 4) {
+                Text("Thinking:")
+                Text(editing ? selected.label : saved.label).foregroundStyle(.secondary)
+            }.font(.caption).fixedSize()
+            if store.controlBusy { ProgressView().controlSize(.mini) }
+            Spacer(minLength: 0)
+        }
+        .onAppear { restorePosition() }
+        .onChange(of: store.agentSettings?.thinkingChoice) { _, _ in if !editing { restorePosition() } }
+        .onChange(of: store.controlBusy) { _, busy in if !busy && !editing { restorePosition() } }
+        .onChange(of: store.connected) { _, connected in
+            if !connected { editing = false; restorePosition() }
+        }
+    }
+    private func restorePosition() {
+        // Custom API policies stay untouched until the user explicitly moves the slider.
+        position = Double(Self.choices.firstIndex(of: saved) ?? 2)
+    }
+    private func save() {
+        guard enabled, selected != saved else { return }
+        store.updateThinking(selected)
+    }
+}
+
 struct MessageRow: View {
     let message: ChatMessage
     var body: some View {

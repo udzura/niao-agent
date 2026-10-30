@@ -162,6 +162,42 @@ struct UsageSnapshot: Decodable {
     }
 }
 
+struct PlatformUsageSnapshot: Decodable {
+    struct Workers: Decodable {
+        let status: String
+        let requests: Double?
+        let queriedAt: String?
+        let errorCode: String?
+    }
+    struct DurableObjects: Decodable {
+        let status: String
+        let durationGbSeconds: Double?
+        let queriedAt: String?
+        let errorCode: String?
+    }
+    struct Plan: Decodable {
+        let status: String
+        let name: String?
+        let queriedAt: String?
+        let errorCode: String?
+        var label: String {
+            guard status == "available" else { return "未確認" }
+            switch name { case "free": return "Workers Free"; case "paid": return "Workers Paid"; default: return "未確認" }
+        }
+    }
+    let v: Int
+    let dayStart: String
+    let dayEnd: String
+    let asOf: String
+    let workers: Workers
+    let durableObjects: DurableObjects
+    let plan: Plan
+    func isCurrent(at date: Date = Date()) -> Bool {
+        guard let start = UsageSnapshot.parseDate(dayStart), let end = UsageSnapshot.parseDate(dayEnd) else { return false }
+        return start <= date && date < end
+    }
+}
+
 enum ThinkingMode: String, Codable, CaseIterable, Identifiable {
     case automatic = "auto", on, off
     var id: String { rawValue }

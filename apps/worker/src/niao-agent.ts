@@ -6,6 +6,7 @@ import { ChatError, errorCode, parseSubmission, type Message, type Turn, type Th
 import { ClefThinkingJudge, isThinkingMode, thinkingPolicy, JUDGE_MODEL, type ThinkingMode, type ThinkingPolicy, type ThinkingJudge } from "./thinking-policy";
 
 import { UsageAnalytics, utcDay, validNeurons } from "./usage";
+import { PlatformAnalytics } from "./platform-usage";
 import { withPastLogsTools, type AdditionalTool } from "./past-logs";
 
 type Active = { requestId: string; text: string; thinking?: ThinkingSegment[] };
@@ -15,6 +16,7 @@ export class NiaoAgent extends Agent<Env> {
   static options = { sendIdentityOnConnect: false };
   observability = undefined; // SDK event payloads are not part of our safe logging contract.
   private analytics = new UsageAnalytics(this.env);
+  private platformAnalytics = new PlatformAnalytics(this.env);
   private active: Active | null = null;
   private bootId = crypto.randomUUID();
 
@@ -120,6 +122,11 @@ export class NiaoAgent extends Agent<Env> {
     }
     if (request.method !== "GET") return this.json({code: "method_not_allowed"}, 405);
     if (url.pathname.endsWith("/usage")) return this.usageResponse();
+    if (url.pathname.endsWith("/platform-usage")) {
+      let snapshot = await this.platformAnalytics.today();
+      if (snapshot.dayStart !== utcDay(new Date()).dayStart) snapshot = await this.platformAnalytics.today();
+      return Response.json(snapshot, {headers: {"Cache-Control": "no-store"}});
+    }
     if (!url.pathname.endsWith("/history")) return new Response("WebSocket upgrade required", {status: 426});
     let after = Number(url.searchParams.get("after") ?? "0");
     if (!Number.isSafeInteger(after) || after < 0) return new Response("Invalid cursor", {status: 400});
