@@ -3,25 +3,61 @@
   "name": "niao-past-logs",
   "main": "src/index.ts",
   "compatibility_date": "2026-10-27",
-  "compatibility_flags": ["nodejs_compat"],
-  "ai": {"binding": "AI", "remote": true},
-  "vectorize": [{"binding": "VECTORIZE", "index_name": "niao-past-logs", "remote": true}],
-  "d1_databases": [{
-    "binding": "DB",
-    "database_name": "niao-past-logs",
-    // Replace after `wrangler d1 create niao-past-logs`; never a credential.
-    "database_id": "00000000-0000-0000-0000-000000000000",
-    "migrations_dir": "migrations"
-  }],
-  "observability": {"logs": {"enabled": false}},
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "ai": {
+    "binding": "AI",
+    "remote": true
+  },
+  "vectorize": [
+    {
+      "binding": "VECTORIZE",
+      "index_name": "niao-past-logs",
+      "remote": true
+    }
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "niao-past-logs",
+      // Replace after `wrangler d1 create niao-past-logs`; never a credential.
+      "database_id": "dd9fd963-dfca-4929-a026-eff77c2b39cb",
+      "migrations_dir": "migrations"
+    },
+    {
+      "binding": "niao_past_logs",
+      "database_name": "niao-past-logs",
+      "database_id": "dd9fd963-dfca-4929-a026-eff77c2b39cb",
+      "remote": true
+    }
+  ],
+  "observability": {
+    "logs": {
+      "enabled": false
+    }
+  },
   "env": {
     "development": {
-      "ai": {"binding": "AI", "remote": true},
-      "vectorize": [{"binding": "VECTORIZE", "index_name": "niao-past-logs-dev", "remote": true}],
-      "d1_databases": [{
-        "binding": "DB", "database_name": "niao-past-logs-dev",
-        "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "migrations"
-      }]
+      "ai": {
+        "binding": "AI",
+        "remote": true
+      },
+      "vectorize": [
+        {
+          "binding": "VECTORIZE",
+          "index_name": "niao-past-logs-dev",
+          "remote": true
+        }
+      ],
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "niao-past-logs-dev",
+          "database_id": "dd9fd963-dfca-4929-a026-eff77c2b39cb",
+          "migrations_dir": "migrations"
+        }
+      ]
     }
   }
 }

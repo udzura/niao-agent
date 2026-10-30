@@ -3,12 +3,22 @@
   "name": "niao-past-logs",
   "main": "src/index.ts",
   "compatibility_date": "2026-10-27",
-  "compatibility_flags": ["nodejs_compat"],
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
   // Real local D1 and keyword search. Semantic calls return an explicit error;
   // there is no offline fake embedding model or fake vector database.
-  "d1_databases": [{
-    "binding": "DB", "database_name": "niao-past-logs-dev",
-    "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "migrations"
-  }],
-  "observability": {"logs": {"enabled": false}}
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "niao-past-logs-dev",
+      "database_id": "dd9fd963-dfca-4929-a026-eff77c2b39cb",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "observability": {
+    "logs": {
+      "enabled": false
+    }
+  }
 }
