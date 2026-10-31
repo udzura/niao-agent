@@ -19,6 +19,15 @@ struct Turn: Codable {
     let requestId: String
     let status: String
     let errorCode: String?
+    var errorDetails: AIErrorDetails? = nil
+}
+struct AIErrorDetails: Codable, Equatable {
+    let provider: String
+    let reason: String
+    let message: String
+    let providerCode: Int?
+    let httpStatus: Int?
+    let retryAt: String?
 }
 struct PartialMessage: Codable {
     let requestId: String
@@ -48,6 +57,7 @@ struct ServerEvent: Decodable {
     let messages: [ChatMessage]?
     let text: String?
     let code: String?
+    let details: AIErrorDetails?
     let active: PartialMessage?
 }
 struct Submission: Codable {
@@ -94,8 +104,22 @@ func mergeMessages(_ existing: [ChatMessage], _ incoming: [ChatMessage]) -> [Cha
     return byID.values.sorted { $0.seq < $1.seq }
 }
 
-func explanation(_ code: String) -> String {
-    switch code {
+func explanation(_ code: String, details: AIErrorDetails? = nil) -> String {
+    if let details, details.provider == "cloudflare" {
+        let message: String
+        switch details.reason {
+        case "daily_quota_exceeded": message = "Workers AI の1日10,000 Neuronsの無料枠に達しました。毎日 UTC 0:00（日本時間9:00）にリセットされます。"
+        case "capacity_exceeded": message = "Workers AI が一時的に混雑しています。時間を置いて再試行してください。"
+        case "rate_limited": message = "Workers AI のリクエスト制限に達しました。時間を置いて再試行してください。"
+        case "paid_plan_required": message = "このモデルには Workers Paid プランが必要です。モデルまたはプランを確認してください。"
+        case "access_denied": message = "Workers AI へのアクセスが拒否されました。アカウントの権限やモデルの利用条件を確認してください。"
+        case "timeout": message = "Workers AI の応答がタイムアウトしました。時間を置いて再試行してください。"
+        default: message = explanation(code)
+        }
+        let codes = [details.httpStatus.map { "HTTP \($0)" }, details.providerCode.map { "Cloudflare \($0)" }].compactMap { $0 }
+        return codes.isEmpty ? message : message + "\n" + codes.joined(separator: " / ")
+    }
+    return switch code {
     case "tool_limit": "ツールの実行回数上限に達しました。処理を小さく分けてお試しください。"
     case "invalid_tool_call": "AIが返したツール呼び出しを処理できませんでした。"
     case "unsupported_model": "このモデルは選択できません。サーバーのモデル一覧を確認してください。"

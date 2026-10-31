@@ -3,12 +3,12 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "wrangler dev -c wrangler.jsonc -c ../ruby-runner/wrangler.jsonc --ip 127.0.0.1",
+    "dev": "wrangler dev -c wrangler.jsonc -c ../ruby-runner/wrangler.jsonc -c ../tools-misc/wrangler.jsonc --ip 127.0.0.1",
     "build": "wrangler deploy --dry-run --outdir build",
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "pretest": "npm run build -w @niao/ruby-runner && npm run build -w @niao/past-logs"
+    "pretest": "npm run build -w @niao/ruby-runner && npm run build -w @niao/past-logs && npm run build -w @niao/tools-misc"
   },
   "dependencies": {
     "agents": "0.31.0",

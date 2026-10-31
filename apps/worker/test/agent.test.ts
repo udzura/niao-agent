@@ -5,6 +5,7 @@ import { NiaoAgent } from "../src/niao-agent";
 import { ChatError } from "../src/protocol";
 import { ClefThinkingJudge } from "../src/thinking-policy";
 import { PlatformAnalytics } from "../src/platform-usage";
+import {workersAIError} from "../src/ai-errors";
 
 const headers = {Authorization: "Bearer test-only-token-000000000000000000000000"};
 const base = "https://test/agents/niao-agent/personal";
@@ -52,6 +53,25 @@ async function history(after = 0) {
   return response.json<any>();
 }
 
+it("returns redacted provider details over WebSocket and restores them after eviction",async()=>{
+  await runInDurableObject(await stub(),(agent:NiaoAgent)=>{
+    (agent as any).createModel=()=>({async *stream(){
+      throw workersAIError(new Error("4006: AiError: you have used up your daily free allocation of 10,000 neurons PRIVATE_CONVERSATION SECRET_TOKEN"));
+    }});
+  });
+  const client=await connect();const id=crypto.randomUUID();send(client.ws,id);
+  const failed=await client.until(e=>e.type==="error"&&e.requestId===id);
+  expect(failed).toMatchObject({code:"ai_rate_limited",details:{provider:"cloudflare",providerCode:4006,reason:"daily_quota_exceeded"}});
+  expect(JSON.stringify(failed)).not.toMatch(/PRIVATE_CONVERSATION|SECRET_TOKEN/);
+  client.ws.close();await evictDurableObject(await stub(),{webSockets:"close"});
+  const page=await history();expect(page.turns).toEqual([{requestId:id,status:"failed",errorCode:"ai_rate_limited",errorDetails:failed.details}]);
+  await model();const retry=await connect();send(retry.ws,id);
+  await retry.until(e=>e.type==="committed");expect((await history()).turns).toEqual([]);
+  await runInDurableObject(await stub(),(agent:NiaoAgent)=>{
+    expect(agent.sql<{errorDetails:string|null}>`SELECT errorDetails FROM niao_turns WHERE requestId=${id}`[0].errorDetails).toBeNull();
+  });
+});
+
 describe("authenticated Worker boundary", () => {
   it("rejects unauthenticated HTTP and upgrades before allocating an agent", async () => {
     for (const path of ["/health", "/agents/niao-agent/personal/usage", "/agents/niao-agent/personal/platform-usage", "/agents/niao-agent/personal/history", "/agents/niao-agent/personal"]) {
@@ -87,27 +107,28 @@ describe("automatic thinking and judge accounting",()=>{
   const gemma="@cf/google/gemma-4-26b-a4b-it";
   const usage=async()=> (await SELF.fetch(`${base}/usage`,{headers})).json<any>();
   it.each([
-    [0.15,0.45,true,true], [0.35,0.65,false,true], [0.65,0.85,false,false],
-  ])("applies composer thresholds %s / %s to each following turn without changing the model",async(offThreshold,onThreshold,lowEnabled,midEnabled)=>{
-    await settingsUpdate({modelId:gemma,thinkingMode:'on'});
+    [gemma,0.15,0.45,true,true], [gemma,0.35,0.65,false,true], [gemma,0.65,0.85,false,false],
+    ["@cf/qwen/qwen3.8-27b",0.15,0.45,true,true], ["@cf/qwen/qwen3.8-27b",0.35,0.65,false,true], ["@cf/qwen/qwen3.8-27b",0.65,0.85,false,false],
+  ])("applies composer thresholds for %s: %s / %s to each following turn without changing the model",async(selectedModel,offThreshold,onThreshold,lowEnabled,midEnabled)=>{
+    await settingsUpdate({modelId:selectedModel,thinkingMode:'on'});
     const client=await connect();
     const policy={offThreshold,onThreshold,ambiguity:'on',timeoutMs:3000};
-    expect((await settingsUpdate({thinkingMode:'auto',thinkingPolicy:policy})).body).toMatchObject({modelId:gemma,thinkingMode:'auto',thinkingPolicy:policy});
-    expect((await client.until(e=>e.type==='settings_updated')).settings).toMatchObject({modelId:gemma,thinkingPolicy:policy});
+    expect((await settingsUpdate({thinkingMode:'auto',thinkingPolicy:policy})).body).toMatchObject({modelId:selectedModel,thinkingMode:'auto',thinkingPolicy:policy});
+    expect((await client.until(e=>e.type==='settings_updated')).settings).toMatchObject({modelId:selectedModel,thinkingPolicy:policy});
     for (const [score,enabled] of [[0.2,lowEnabled],[0.5,midEnabled]] as const) {
       await runInDurableObject(await stub(),(agent:NiaoAgent)=>{
         (agent as any).createThinkingJudge=()=>new ClefThinkingJudge({run:async()=>({answers:{needs_thinking:{type:'noul',noul:score}},usage:{input_tokens:10}})} as unknown as Ai);
         (agent as any).createModel=(modelId:string,thinking:boolean)=>({async *stream(){
-          expect(modelId).toBe(gemma);expect(thinking).toBe(enabled);yield {text:thinking?'on':'off'};
+          expect(modelId).toBe(selectedModel);expect(thinking).toBe(enabled);yield {text:thinking?'on':'off'};
         }});
       });
       const id=crypto.randomUUID();send(client.ws,id);
       expect((await client.until(e=>e.type==='committed'&&e.requestId===id)).messages[1].content).toBe(enabled?'on':'off');
     }
     expect((await usage()).local.judge.attempts).toBe(2);
-    expect((await settingsUpdate({thinkingMode:'off'})).body).toMatchObject({modelId:gemma,thinkingMode:'off',thinkingPolicy:policy});
+    expect((await settingsUpdate({thinkingMode:'off'})).body).toMatchObject({modelId:selectedModel,thinkingMode:'off',thinkingPolicy:policy});
     client.ws.close();await evictDurableObject(await stub(),{webSockets:'close'});
-    expect((await history()).settings).toMatchObject({modelId:gemma,thinkingMode:'off',thinkingPolicy:policy});
+    expect((await history()).settings).toMatchObject({modelId:selectedModel,thinkingMode:'off',thinkingPolicy:policy});
   });
   it("validates partial settings atomically and preserves thinking on model-only updates",async()=>{
     await settingsUpdate({modelId:gemma,thinkingMode:'auto',thinkingPolicy:{offThreshold:0.15,onThreshold:0.45}});
@@ -255,7 +276,7 @@ describe("model settings and conversation cleanup", () => {
     expect((await SELF.fetch(`${base}/settings`, {method: "PUT", headers: {...headers, "Content-Type": "application/json"}, body: "null"})).status).toBe(400);
     expect((await SELF.fetch(`${base}/history`, {method: "DELETE", headers})).status).toBe(428);
     const settings = await (await SELF.fetch(`${base}/settings`, {headers})).json<any>();
-    expect(settings.modelId).toBe(gemma); expect(settings.models.map((x: any) => x.id)).toEqual([gemma, glm]);
+    expect(settings.modelId).toBe(gemma); expect(settings.models.map((x: any) => x.id)).toEqual([gemma, glm, "@cf/qwen/qwen3.8-27b"]);
   });
   it("persists the selected model across eviction and uses it for subsequent inference", async () => {
     const updated = await put(glm);
@@ -273,7 +294,7 @@ describe("model settings and conversation cleanup", () => {
     const get = async () => (await SELF.fetch(`${base}/settings`, {headers})).json<any>();
     const initial = await get();
     expect(initial.thinkingEnabled).toBe(false);
-    expect(initial.models.map((model:any) => model.supportsThinking)).toEqual([true,false]);
+    expect(initial.models.map((model:any) => model.supportsThinking)).toEqual([true,false,true]);
     for (const value of [null, "true", 1, {}, []]) {
       const response = await put(glm,value);
       expect(response.status).toBe(400);

@@ -1,4 +1,6 @@
+#if os(macOS)
 import AppKit
+#endif
 import Combine
 import Foundation
 
@@ -63,6 +65,7 @@ final class ChatStore: ObservableObject {
         } catch { self.error = "未送信メッセージの復元に失敗しました。\(error.localizedDescription)" }
         toolSessionID = toolStatistics.beginSession()
         saveToolStatistics()
+        #if os(macOS)
         NotificationCenter.default.addObserver(self, selector: #selector(wake), name: NSApplication.didBecomeActiveNotification, object: nil)
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(wake), name: NSWorkspace.didWakeNotification, object: nil)
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(sleep), name: NSWorkspace.willSleepNotification, object: nil)
@@ -70,6 +73,7 @@ final class ChatStore: ObservableObject {
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(sleep), name: NSWorkspace.sessionDidResignActiveNotification, object: nil)
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(wake), name: NSWorkspace.screensDidWakeNotification, object: nil)
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(wake), name: NSWorkspace.sessionDidBecomeActiveNotification, object: nil)
+        #endif
     }
     var busy: Bool { partial != nil || turns.contains { $0.status == "running" } }
     var canSend: Bool { connected && !controlBusy && !busy && outbox == nil && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && draft.utf16.count <= 8000 }
@@ -94,8 +98,12 @@ final class ChatStore: ObservableObject {
         reconnect()
     }
     func start() { if loop == nil { reconnect() } }
-    @objc private func wake() { if !connected && loop == nil && !authenticationBlocked { reconnect() } }
-    @objc private func sleep() { Keychain.lock(); disconnect(); connection = "ロック中" }
+    func resume() { if !connected && loop == nil && !authenticationBlocked { reconnect() } }
+    func suspend() { Keychain.lock(); disconnect(); connection = "ロック中" }
+    #if os(macOS)
+    @objc private func wake() { resume() }
+    @objc private func sleep() { suspend() }
+    #endif
     private func disconnect() {
         generation = UUID()
         controlBusy = false
@@ -245,15 +253,24 @@ final class ChatStore: ObservableObject {
             if partial?.requestId == event.requestId { partial = nil }
             if outbox?.requestId == event.requestId { clearOutbox() }
             refreshUsage()
+        case "message_added":
+            // Background follow-ups have no user submission/outbox to complete.
+            if let message = event.message { messages = mergeMessages(messages, [message]) }
+            if partial?.requestId == event.requestId { partial = nil }
+            refreshUsage()
+        case "notification_deferred":
+            if partial?.requestId == event.requestId { partial = nil }
+            if let details = event.details { error = explanation(event.code ?? "ai_unavailable", details: details) }
+            refreshUsage()
         case "error":
             runningToolName = nil
             finishToolTurn(event)
             refreshUsage()
-            error = explanation(event.code ?? "unknown")
+            error = explanation(event.code ?? "unknown", details: event.details)
             if let requestID = event.requestId {
                 turns.removeAll { $0.requestId == requestID }
                 if messages.contains(where: { $0.requestId == requestID && $0.role == "user" }) {
-                    turns.append(Turn(requestId: requestID, status: "failed", errorCode: event.code))
+                    turns.append(Turn(requestId: requestID, status: "failed", errorCode: event.code, errorDetails: event.details))
                 }
                 if partial?.requestId == requestID { partial = nil }
             }

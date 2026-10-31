@@ -1,0 +1,19 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "niao-tools-misc",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-27",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "WEB_FETCH_TIMEOUT_MS": "8000",
+    "WEB_FETCH_MAX_REDIRECTS": "3",
+    "WEB_FETCH_MAX_DOWNLOAD_BYTES": "32768",
+    "WEB_FETCH_MAX_CONTENT_CHARS": "12000",
+    "WEB_FETCH_MAX_RESULT_BYTES": "32768",
+    "WEB_FETCH_MAX_DOM_ELEMENTS": "300",
+    "WEB_FETCH_MAX_DOM_DEPTH": "48"
+  },
+  "workers_dev": false,
+  "preview_urls": false,
+  "observability": {"logs": {"enabled": true, "invocation_logs": true}}
+}

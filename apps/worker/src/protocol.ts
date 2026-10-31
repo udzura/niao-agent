@@ -14,10 +14,19 @@ export interface Turn {
   requestId: string;
   status: "running" | "failed" | "completed";
   errorCode: string | null;
+  errorDetails?: AIErrorDetails;
+}
+export interface AIErrorDetails {
+  provider:"cloudflare";
+  reason:"daily_quota_exceeded"|"capacity_exceeded"|"rate_limited"|"paid_plan_required"|"access_denied"|"timeout"|"unknown";
+  message:string;
+  providerCode?:number;
+  httpStatus?:number;
+  retryAt?:string;
 }
 export type Submission = { v: 1; type: "send"; requestId: string; content: string; epoch?: number };
 export class ChatError extends Error {
-  constructor(public code: string) { super(code); }
+  constructor(public code: string,public details?:AIErrorDetails) { super(code); }
 }
 export function parseSubmission(raw: unknown): Submission {
   if (typeof raw !== "string" || raw.length > 50_000) throw new ChatError("invalid_message");

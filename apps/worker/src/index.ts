@@ -1,9 +1,13 @@
 import { routeAgentRequest } from "agents";
 import { authenticated } from "./auth";
+import type {NiaoAgent} from "./niao-agent";
+import {consumeFetchJobs,type FetchJobMessage} from "./fetch-jobs";
 export { NiaoAgent } from "./niao-agent";
 export interface Env {
+  TOOLS_MISC: Service<import("../../tools-misc/src/index").default>;
   RUBY_RUNNER: Service<import("../../ruby-runner/src/index").default>;
-  NiaoAgent: DurableObjectNamespace;
+  NiaoAgent: DurableObjectNamespace<NiaoAgent>;
+  FETCH_JOBS?: Queue<FetchJobMessage>;
   AI: Ai;
   NIAO_TOKEN: string;
   CF_ACCOUNT_ID?: string;
@@ -12,6 +16,7 @@ export interface Env {
   PAST_LOGS_MCP_TOKEN?: string;
 }
 export default {
+  queue: consumeFetchJobs,
   async fetch(request: Request, env: Env): Promise<Response> {
     // Authenticate before routing, including upgrade requests and health checks.
     if (!env.NIAO_TOKEN || env.NIAO_TOKEN.length < 32) return new Response("Server is not configured", {status: 503});

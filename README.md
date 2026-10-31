@@ -1,14 +1,18 @@
 # Niao
 
-macOS に住むパーソナル AI コンパニオンの Phase 1。SwiftUI のネイティブチャットと Cloudflare Agents SDK / SQLite Durable Object / Workers AI を接続します。
+macOS / iPhoneで使えるパーソナル AI コンパニオンの Phase 1。SwiftUI のネイティブチャットと Cloudflare Agents SDK / SQLite Durable Object / Workers AI を接続します。
 
 - メインウィンドウ、メニューバーから開く・フォーカス、入力・送信、逐次表示、エラー・再試行
 - サーバーを正とする永続履歴、カーソル同期、送信 ID による重複防止
 - HTTP と WebSocket upgrade の Bearer 認証、macOS Keychain 保存
 - 切断時の指数バックオフ、スリープ・復帰、20 秒ごとの履歴照合
-- モデル: Gemma 4（既定）/ GLM 4.7 Flash を設定画面・APIから切り替え可能
-- Gemma 4のthinkingは回答と分離し、「思考過程」から開閉できます。再起動後も確認できます
+- モデル: Gemma 4（既定）/ GLM 4.7 Flash / Qwen 3.8 27B を設定画面・APIから切り替え可能
+- Gemma 4・Qwen 3.8のthinkingは回答と分離し、「思考過程」から開閉できます。再起動後も確認できます
 - チャット履歴の削除（モデル設定・使用量は保持）。ニュース収集、定期実行、長期記憶は含みません
+- Web Fetch: 既知URLのHTML記事・テキスト・Markdownを取得し、読みやすい本文へ変換（[制限・安全性・デプロイ](docs/web-fetch.md)）
+- 非同期Web Fetch: `web_fetch_async`で取得をQueueへ送り、会話の区切りで要約を追加（[設定・復旧・デプロイ](docs/async-fetch.md)）
+- kaniさんの記事: 記事Markdown取得・RSSの最新記事・タイトル部分一致検索（[使い方・デプロイ](docs/kani-tools.md)）
+- 天気予報: Open-Meteoの地名検索・現在の天気・最大7日分の予報を`tools-misc` Service Binding経由で取得（[開発・デプロイ手順](docs/weather-tools.md)）
 - 制限付きPicoRubyツールで計算・文字列処理（外部I/Oなし）
 - Past Logs: 記事・日記のD1保存、日本語/英語キーワード検索・意味検索、読み取り専用MCPをNiaoのツールとして利用（[設定・取り込み・デプロイ](docs/past-logs.md)）
 - [Cosense記事の一括インポート](docs/cosense-import.md)（公開ページの一覧・dry-run・途中再開に対応）
@@ -25,6 +29,15 @@ apps/
     Tests/
     Smoke/                  # 実際の URLSession で行う E2E 検証
     scripts/{build,smoke}.sh
+  ios/
+    Niao.xcodeproj/          # iPhoneターゲット、macos/NiaoのSwiftソースを共有
+    Assets.xcassets/         # iOS用の鳥アイコン
+    Info.plist
+    UITests/
+    scripts/{build,test}.sh
+  tools-misc/               # 小さなツール用Worker / Service Binding RPC / 天気・kani・Web Fetch
+    src/{index,contracts,weather,kani,web-fetch,web-resource,web-extract}.ts
+    wrangler.jsonc
   ruby-runner/              # 固定Worker / Service Binding RPC / PicoRuby Wasm
     src/generated/          # 同梱済みJS・Wasm
     wrangler.jsonc
@@ -104,6 +117,12 @@ open apps/macos/build/Build/Products/Debug/Niao.app
 
 本番 URL は HTTPS が必須です。HTTP は localhost / loopback のローカル開発に限ります。HTTP リダイレクトには追従しません。
 
+## iPhone アプリを起動
+
+`apps/ios/Niao.xcodeproj`をXcodeで開き、`Niao` scheme → iPhone 16 Pro → Run。CLIビルドは`npm run build:ios`です。設定で既存AgentのHTTPS URLと`NIAO_TOKEN`を入力すると、Macと同じ会話を利用できます。Face ID / パスコード、統計、Thinking、複数行入力にも対応します。
+
+実機署名・ローカル接続・検証手順は[iOS版の手順](docs/ios.md)を参照してください。この移植によるWorkerの再デプロイは不要です。
+
 ## モデル変更・チャットのクリーンアップ
 
 接続後、歯車の設定画面でモデルとThinkingの「自動／常にON／常にOFF」を選び、「モデル設定を保存」を押します。次の会話ターンから適用され、ツール実行後の続きも開始時の設定で完了します。自動ではClef-flashが開始時に1回判定し、曖昧・取得失敗時は既定でONにします。設定はサーバーに保存され、再起動後も保持します。既存ON/OFFは維持し、新規の既定はOFFです。現在はGemma 4に適用し、GLMでは判定を省略します。閾値・曖昧時方針・タイムアウトの調整と計測の詳細は[自動thinking](docs/automatic-thinking.md)を参照してください。
@@ -116,7 +135,7 @@ open apps/macos/build/Build/Products/Debug/Niao.app
 
 接続トークンの読み書きの前に、NiaoがTouch IDまたはMacのパスワードで本人確認します。本人確認済み状態は起動中に共有し、スリープ・画面消灯・ユーザーセッション切り替えで失効します。キャンセル後は「再接続」や設定から再試行してください。
 
-現在はアプリ内の認証ゲートで、既存Keychain項目のOS側ACLは変更しません。macOS標準のKeychain許可ダイアログが別に出る場合があります。設定でURLを変えた後は「保存済みトークンを読み込む」で明示的に取得します。詳細と実機確認手順は[Keychain認証](docs/keychain-auth.md)を参照してください。
+Mac版もData Protection Keychainを利用し、Apple Development署名とアプリ専用のaccess groupで保存します。既存トークンは初回読み出し時に移行・検証し、旧項目は保持します。この移行時だけ旧Keychainの許可やパスワード入力が必要になる場合があります。本人確認は引き続きアプリ内のゲートで、項目自体の生体認証ACLは追加しません。[署名・移行・検証手順](docs/keychain-auth.md)を参照してください。
 
 ## チャットのMarkdown表示
 
@@ -171,7 +190,7 @@ npm run deploy
 curl -H "Authorization: Bearer $NIAO_TOKEN" "$NIAO_BACKEND_URL/health"
 ```
 
-このビルドは個人の開発用 ad-hoc 署名です。配布する場合は Developer ID 署名と notarization を別途行ってください。
+Mac版は自身の開発TeamによるApple Development署名を使用します。初回のCLIビルドでは`npm run build:macos -- -allowProvisioningUpdates`でプロファイルの取得・作成を許可できます。配布する場合はDeveloper ID署名とnotarization、Keychain用プロファイルを別途準備してください。
 
 ## 日次ニューロン使用量を表示する
 

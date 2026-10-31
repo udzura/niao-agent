@@ -22,11 +22,19 @@ struct ToolStatisticsView: View {
                 if counts.isEmpty { Text("まだツール実行の記録はありません。").foregroundStyle(.secondary) }
                 if !counts.isEmpty { ToolCallChart(counts: counts) }
                 ForEach(counts.keys.sorted(), id: \.self) { name in
+                    #if os(iOS)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(name).font(.body.monospaced()).textSelection(.enabled)
+                        Text("\(counts[name]!.calls) 回 / 完了通知 \(counts[name]!.completed) 回")
+                            .font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                    }
+                    #else
                     HStack {
                         Text(name).font(.body.monospaced())
                         Spacer()
                         Text("\(counts[name]!.calls) 回 / 完了通知 \(counts[name]!.completed) 回").monospacedDigit()
                     }
+                    #endif
                 }
                 Divider()
                 Text("セッションはアプリの起動から終了までです。再接続・スリープ復帰・チャット削除では区切りません。")
@@ -49,12 +57,15 @@ struct ToolStatisticsView: View {
                         }.padding(.vertical, 4)
                     }
                 }
-                Text("このMacで受信した通知のみを集計します。未接続中や導入前の実行は復元できません。「完了通知」はツール処理が戻った通知で、ツール自体の成功を表すものではありません。接続先をまたいだ合計です。")
+                Text("この端末で受信した通知のみを集計します。未接続中や導入前の実行は復元できません。「完了通知」はツール処理が戻った通知で、ツール自体の成功を表すものではありません。接続先をまたいだ合計です。")
                     .font(.caption).foregroundStyle(.secondary)
                 if let error = store.toolStatisticsError { Text(error).foregroundStyle(.orange) }
                 Spacer(minLength: 0)
             }.padding(24).frame(maxWidth: .infinity, alignment: .leading)
-        }.frame(minWidth: 520, minHeight: 440)
+        }
+        #if os(macOS)
+        .frame(minWidth: 520, minHeight: 440)
+        #endif
     }
     private func metric(_ label: String, _ value: Int) -> some View {
         VStack(alignment: .leading) {
@@ -97,8 +108,15 @@ struct ToolCallChart: View {
                 }
             }
             .chartYAxis {
-                AxisMarks { _ in
-                    AxisValueLabel().font(.caption)
+                AxisMarks { value in
+                    AxisValueLabel {
+                        if let name = value.as(String.self) {
+                            Text(name).font(.caption).lineLimit(1).truncationMode(.middle)
+                                #if os(iOS)
+                                .frame(maxWidth: 115)
+                                #endif
+                        }
+                    }
                 }
             }
             .frame(height: CGFloat(max(1, names.count) * 42 + 55))

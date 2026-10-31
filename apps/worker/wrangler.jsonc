@@ -10,11 +10,20 @@
     {
       "binding": "RUBY_RUNNER",
       "service": "niao-ruby-runner"
+    },
+    {
+      "binding": "TOOLS_MISC",
+      "service": "niao-tools-misc"
     }
   ],
   "ai": {
     "binding": "AI",
     "remote": true
+  },
+  "queues": {
+    "producers": [{"binding":"FETCH_JOBS","queue":"niao-fetch-jobs"}],
+    "consumers": [{"queue":"niao-fetch-jobs","max_batch_size":1,"max_batch_timeout":1,
+      "max_concurrency":1,"max_retries":5,"dead_letter_queue":"niao-fetch-jobs-dlq"}]
   },
   "durable_objects": {
     "bindings": [

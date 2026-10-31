@@ -41,16 +41,44 @@ Use a UUID and preserve it for retries. Content is trimmed and must contain 1–
 | `accepted` | `requestId`, `message` | User row is durable; do not create another local duplicate. |
 | `partial` | `requestId`, `text`, optional `thinking` | Replace transient assistant text/thinking with this **cumulative** snapshot. Not a delta or committed row. |
 | `committed` | `requestId`, `messages` | Durable user/assistant pair. Merge by ID and clear transient display. |
+| `message_added` | `requestId`, `message` | Persisted background assistant follow-up. Merge by ID; clear only the matching partial. No user submission/outbox is completed. |
+| `notification_deferred` | `requestId` | Background summary will retry; clear only the matching partial. Ordinary turns/outbox are unchanged. |
 | `tool_status` | `requestId`, `name`, `status` | Transient tool activity (`running` or `completed`); no code/output is sent to the UI. |
 | `settings_updated` | `settings` | Persisted model selection changed. |
 | `history_cleared` | `epoch` | Reset local conversation, cursor, transient output, and old outbox. |
-| `error` | optional `requestId`, `code` | Request rejected or generation failed. Discard transient text; synchronize history. |
+| `error` | optional `requestId`, `code`, optional `details` | Request rejected or generation failed. Discard transient text; synchronize history. |
 
 All server frames include `v:1` and the current `epoch`. Accepted/partial/committed/generation-error events broadcast to connected clients. An individual retry of an existing completed turn returns its pair only to the requester. Validation and busy errors also go only to the requester. Connections use the base SDK's hibernation support; no application RPC is exposed.
 
-Error codes: `tool_limit`, `invalid_tool_call`, `invalid_message`, `id_conflict`, `busy`, `interrupted`, `ai_rate_limited`, `ai_timeout`, `ai_unavailable`, `invalid_ai_response`, `incomplete_ai_stream`, `empty_ai_response`, `response_too_large`, `internal_error`. Some provider quota errors do not supply a numeric HTTP status and are safely classified as `ai_unavailable`; the raw provider error is intentionally withheld.
+Error codes: `tool_limit`, `invalid_tool_call`, `invalid_message`, `id_conflict`, `busy`, `interrupted`, `ai_rate_limited`, `ai_timeout`, `ai_unavailable`, `invalid_ai_response`, `incomplete_ai_stream`, `empty_ai_response`, `response_too_large`, `internal_error`. Recognized quota/capacity failures use `ai_rate_limited` even when the binding omits HTTP status. Optional safe details distinguish these causes; the raw provider error is intentionally withheld.
 
 A failed turn can be retried with the same ID and identical trimmed content. A running duplicate cannot start another generation. Completed duplicates do not call the model. There is no cancel, edit, or regeneration command. Whole-history deletion is available over HTTP. Partial stream replay is intentionally not durable: after a connection interruption, HTTP and `ready` provide the latest active snapshot or completed history; after an isolate crash the user explicitly retries an interrupted turn.
+
+## Workers AI error details
+
+Workers AI failures may include an additive `details` object in `error` and `notification_deferred` events:
+
+```json
+{
+  "v": 1,
+  "type": "error",
+  "code": "ai_rate_limited",
+  "details": {
+    "provider": "cloudflare",
+    "reason": "daily_quota_exceeded",
+    "providerCode": 4006,
+    "httpStatus": 429,
+    "message": "The daily free allocation of 10,000 Workers AI Neurons has been exhausted. It resets at 00:00 UTC.",
+    "retryAt": "2026-11-01T00:00:00.000Z"
+  }
+}
+```
+
+`providerCode` and `httpStatus` are present only when the provider supplies them in a recognized form. Binding errors often supply an internal code in their message without an HTTP status. `reason` is `daily_quota_exceeded`, `capacity_exceeded`, `rate_limited`, `paid_plan_required`, `access_denied`, `timeout`, or `unknown`. `retryAt` is the next UTC midnight for the daily-quota case; it is not a guarantee that a later request will succeed.
+
+The provider's numeric code is preserved, while `message` is application-owned explanatory text. Raw exception strings, echoed input, arbitrary response fields, headers, credentials, and stacks are never returned or logged. Code 4006 has been observed for both daily quota and temporary capacity: classification uses the recognized quota/capacity wording, not 4006 alone. Unknown failures still expose bounded numeric diagnostics when available. See [Cloudflare's error catalog](https://developers.cloudflare.com/workers-ai/platform/errors/) and [the binding error implementation](https://github.com/cloudflare/workerd/blob/main/src/cloudflare/internal/ai-api.ts).
+
+Failed ordinary turns persist the same object as optional `turns[].errorDetails` in HTTP history, so reconnect/hibernation retains the explanation beside the retry button. A retry clears the previous details, and an interrupted turn does not retain stale provider details. The SQL column is added in place without clearing history. Existing `code` values remain compatible; older clients can ignore `details`. Mac/iOS clients translate the reason to Japanese and display available HTTP/Cloudflare codes. Judge failures and background-summary failures log the same safe details. Background-summary retries retain their existing policy.
 
 ## Optional thinking output
 

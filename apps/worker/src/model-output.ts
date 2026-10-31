@@ -73,6 +73,42 @@ export class Gemma4Adapter implements ModelOutputAdapter {
     return output;
   }
 }
+// Qwen may expose reasoning as structured SSE fields or inline <think> tags.
+// This streaming fallback never sends recognized reasoning tags into chat text.
+export class QwenAdapter implements ModelOutputAdapter {
+  private buffer = "";
+  private thinking = false;
+  private seen = false;
+  transform(chunk: string): ModelOutput {
+    this.buffer += chunk;
+    const output: ModelOutput = {};
+    const markers = ["<think>", "</think>"];
+    while (this.buffer) {
+      const marker = markers.find(value => this.buffer.startsWith(value));
+      if (marker) {
+        this.buffer = this.buffer.slice(marker.length);
+        this.thinking = marker === "<think>"; this.seen = true;
+        output.thinkingActive = this.thinking;
+      } else if (markers.some(value => value.startsWith(this.buffer))) break;
+      else {
+        const next = this.buffer.indexOf("<", 1);
+        const end = this.buffer.startsWith("<") ? 1 : next < 0 ? this.buffer.length : next;
+        const field = this.thinking ? "thinking" : "content";
+        output[field] = (output[field] ?? "") + this.buffer.slice(0,end);
+        this.buffer = this.buffer.slice(end);
+      }
+    }
+    return output;
+  }
+  flush(): ModelOutput {
+    const output: ModelOutput = {};
+    if (this.buffer === "<") output[this.thinking ? "thinking" : "content"] = this.buffer;
+    if (this.seen) output.thinkingActive = false;
+    this.buffer = "";
+    return output;
+  }
+}
 export function modelOutputAdapter(modelId: string): ModelOutputAdapter {
-  return modelId.startsWith('@cf/google/gemma-4-') ? new Gemma4Adapter() : new DefaultAdapter();
+  return modelId.startsWith('@cf/google/gemma-4-') ? new Gemma4Adapter()
+    : modelId === '@cf/qwen/qwen3.8-27b' ? new QwenAdapter() : new DefaultAdapter();
 }

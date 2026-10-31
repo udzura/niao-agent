@@ -25,7 +25,7 @@ struct ThinkingDisclosureView: View {
                 HStack(spacing: 6) {
                     Text("思考過程")
                     if visible.contains(where: \.active) {
-                        ProgressView().controlSize(.mini)
+                        ProgressView().controlSize(.small)
                         Text("思考中…")
                     }
                 }.font(.caption).foregroundStyle(.secondary)

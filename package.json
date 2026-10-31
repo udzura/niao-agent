@@ -4,7 +4,8 @@
   "workspaces": [
     "apps/worker",
     "apps/ruby-runner",
-    "apps/past-logs"
+    "apps/past-logs",
+    "apps/tools-misc"
   ],
   "scripts": {
     "dev": "npm run dev -w apps/worker",
@@ -17,7 +18,10 @@
     "build:runner": "npm run build -w apps/ruby-runner",
     "bench:ruby": "node tools/ruby-sandbox/bench.mjs",
     "dev:past-logs": "npm run dev -w apps/past-logs",
-    "build:past-logs": "npm run build -w apps/past-logs"
+    "build:past-logs": "npm run build -w apps/past-logs",
+    "build:tools": "npm run build -w apps/tools-misc",
+    "build:ios": "bash apps/ios/scripts/build.sh",
+    "test:ios": "bash apps/ios/scripts/test.sh"
   },
   "devDependencies": {
     "esbuild": "0.28.1"

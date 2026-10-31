@@ -1,5 +1,9 @@
 import SwiftUI
+#if os(macOS)
 import AppKit
+#else
+import UIKit
+#endif
 
 struct ChatMarkdownView: View {
     let content: String
@@ -48,8 +52,13 @@ private struct MarkdownCodeView: View {
                 Text(language.isEmpty ? "コード" : language).font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Button {
+                    #if os(macOS)
                     NSPasteboard.general.clearContents()
                     copied = NSPasteboard.general.setString(code, forType: .string)
+                    #else
+                    UIPasteboard.general.string = code
+                    copied = true
+                    #endif
                 } label: {
                     Label(copied ? "コピー済み" : "コピー", systemImage: copied ? "checkmark" : "doc.on.doc")
                 }.buttonStyle(.borderless).font(.caption).help("コードをコピー")

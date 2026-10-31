@@ -1,9 +1,15 @@
 import SwiftUI
+#if os(macOS)
 import AppKit
+#endif
 
 struct ChatView: View {
     @ObservedObject var store: ChatStore
+    #if os(macOS)
     @Environment(\.openWindow) private var openWindow
+    #else
+    @State private var statisticsPresented = false
+    #endif
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var multiline = false
     @State private var confirmClear = false
@@ -15,11 +21,11 @@ struct ChatView: View {
                 Text(store.connection).font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 if !store.connected { Button("再接続") { store.reconnect() } }
-                Button { openWindow(id: "usage-statistics") } label: { Image(systemName: "chart.bar") }
+                Button { showStatistics() } label: { Image(systemName: "chart.bar").touchTarget() }
                     .help("利用状況統計").accessibilityLabel("利用状況統計を開く")
-                Button { confirmClear = true } label: { Image(systemName: "trash") }
-                    .disabled(!store.connected || store.busy || store.controlBusy).help("チャット履歴を削除")
-                Button { store.settingsPresented = true } label: { Image(systemName: "gearshape") }.help("設定")
+                Button { confirmClear = true } label: { Image(systemName: "trash").touchTarget() }
+                    .disabled(!store.connected || store.busy || store.controlBusy).help("チャット履歴を削除").accessibilityLabel("チャット履歴を削除")
+                Button { store.settingsPresented = true } label: { Image(systemName: "gearshape").touchTarget() }.help("設定").accessibilityLabel("設定")
             }.padding(12)
             UsageView(store: store)
             Divider()
@@ -34,7 +40,7 @@ struct ChatView: View {
                             MessageRow(message: message)
                             if let failed = store.turns.first(where: { $0.requestId == message.requestId && $0.status == "failed" }), message.role == "user" {
                                 HStack {
-                                    Text(explanation(failed.errorCode ?? "unknown")).font(.caption).foregroundStyle(.secondary)
+                                    Text(explanation(failed.errorCode ?? "unknown", details: failed.errorDetails)).font(.caption).foregroundStyle(.secondary)
                                     Button("再試行") { store.retry(message) }.disabled(!store.connected || store.busy || store.controlBusy || store.outbox != nil)
                                 }
                             }
@@ -56,6 +62,10 @@ struct ChatView: View {
                 }
                 .onChange(of: store.messages.count) { _, _ in proxy.scrollTo("bottom", anchor: .bottom) }
                 .onChange(of: store.partial?.text) { _, _ in proxy.scrollTo("bottom", anchor: .bottom) }
+                #if os(iOS)
+                .scrollDismissesKeyboard(.interactively)
+                .onChange(of: inputFocused) { _, focused in if focused { proxy.scrollTo("bottom", anchor: .bottom) } }
+                #endif
             }
             .overlay(alignment: .bottomTrailing) { ToolCallToastOverlay(store: store) }
             if let pending = store.outbox {
@@ -84,18 +94,43 @@ struct ChatView: View {
             Text("サーバー上の会話履歴と送信待ちメッセージを削除します。元に戻せません。モデル設定と使用量の記録は残ります。")
         }
         .sheet(isPresented: $store.settingsPresented) { SettingsView(store: store) }
+        #if os(iOS)
+        .sheet(isPresented: $statisticsPresented) {
+            NavigationStack {
+                UsageStatisticsView(store: store)
+                    .navigationTitle("利用状況統計")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完了") { statisticsPresented = false } } }
+            }
+        }
+        #endif
+    }
+    private func showStatistics() {
+        #if os(macOS)
+        openWindow(id: "usage-statistics")
+        #else
+        inputFocused = false
+        statisticsPresented = true
+        #endif
     }
     private var messageComposer: some View {
         VStack(alignment: .leading, spacing: 10) {
             ThinkingSlider(store: store)
             HStack(alignment: .bottom, spacing: 12) {
                 if multiline {
-                    MultilineMessageInput(text: $store.draft, onSend: { store.send() })
+                    multilineInput
                         .frame(height: 150)
                         .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
                         .overlay { RoundedRectangle(cornerRadius: 8).strokeBorder(.secondary.opacity(0.15)) }
                         .transition(.opacity)
                 } else {
+                    #if os(iOS)
+                    TextField("メッセージを入力", text: $store.draft)
+                        .textFieldStyle(.plain).focused($inputFocused).submitLabel(.send)
+                        .onSubmit { store.send() }
+                        .accessibilityIdentifier("message-input")
+                        .transition(.opacity)
+                    #else
                     TextField("メッセージを入力", text: $store.draft, axis: .vertical)
                         .lineLimit(1...3).textFieldStyle(.plain).focused($inputFocused)
                         .onSubmit { store.send() }
@@ -105,10 +140,11 @@ struct ChatView: View {
                             return .handled
                         }
                         .transition(.opacity)
+                    #endif
                 }
-                Button { store.send(); inputFocused = true } label: { Image(systemName: "arrow.up.circle.fill").font(.title2) }
+                Button { store.send(); inputFocused = true } label: { Image(systemName: "arrow.up.circle.fill").font(.title2).touchTarget() }
                     .buttonStyle(.plain).disabled(!store.canSend).keyboardShortcut(.return, modifiers: .control)
-                    .help("送信 (Ctrl＋Enter / ⌘Return)")
+                    .help("送信 (Ctrl＋Enter / ⌘Return)").accessibilityLabel("送信")
             }.clipped()
             HStack {
                 Button {
@@ -122,13 +158,28 @@ struct ChatView: View {
                 }.buttonStyle(.plain).font(.caption).foregroundStyle(.secondary)
                 .accessibilityValue(multiline ? "複数行モード" : "通常モード")
                 Spacer()
+                #if os(macOS)
                 Text(multiline ? "Enterで改行 · Ctrl＋Enterで送信" : "Enterで送信")
                     .font(.caption).foregroundStyle(.secondary)
+                #else
+                if multiline { Text("改行できます").font(.caption).foregroundStyle(.secondary) }
+                #endif
             }
         }.padding(16)
     }
+    @ViewBuilder private var multilineInput: some View {
+        #if os(macOS)
+        MultilineMessageInput(text: $store.draft, onSend: { store.send() })
+        #else
+        TextEditor(text: $store.draft)
+            .scrollContentBackground(.hidden).focused($inputFocused)
+            .padding(4).accessibilityLabel("メッセージを入力（複数行）")
+            .accessibilityIdentifier("multiline-input")
+        #endif
+    }
 
 }
+#if os(macOS)
 // NSTextView keeps Return/IME handling native. Only an explicit modified Return sends.
 struct MultilineMessageInput: NSViewRepresentable {
     @Binding var text: String
@@ -205,6 +256,8 @@ final class MessageTextView: NSTextView {
     }
 }
 
+#endif
+
 // Keep the draft position local while dragging; save only the final choice.
 struct ThinkingSlider: View {
     @ObservedObject var store: ChatStore
@@ -228,7 +281,12 @@ struct ThinkingSlider: View {
                 editing = active
                 if !active { save() }
             })
-            .controlSize(.small).frame(minWidth: 100, idealWidth: 200, maxWidth: 220)
+            .controlSize(.small)
+            #if os(macOS)
+            .frame(minWidth: 100, idealWidth: 200, maxWidth: 220)
+            #else
+            .frame(minWidth: 60, idealWidth: 160, maxWidth: 220)
+            #endif
             .disabled(!enabled)
             .accessibilityLabel("Thinking")
             .accessibilityValue(editing ? selected.label : saved.label)
@@ -238,7 +296,7 @@ struct ThinkingSlider: View {
                 Text("Thinking:")
                 Text(editing ? selected.label : saved.label).foregroundStyle(.secondary)
             }.font(.caption).fixedSize()
-            if store.controlBusy { ProgressView().controlSize(.mini) }
+            if store.controlBusy { ProgressView().controlSize(.small) }
             Spacer(minLength: 0)
         }
         .onAppear { restorePosition() }
@@ -281,46 +339,61 @@ struct SettingsView: View {
     @State private var selectedModel = ""
     @State private var error: String?
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Niao の設定").font(.title2.bold())
-            Form {
-                TextField("バックエンド URL", text: $url)
-                SecureField("アクセストークン", text: $token)
-            }.disabled(credentialBusy)
-            Button("保存済みトークンを読み込む") { Task { await loadToken() } }
-                .disabled(credentialBusy)
-            Text("トークンは接続先ごとに macOS Keychain へ保存します。アクセス前にTouch IDまたはMacのパスワードで本人確認します。")
-                .font(.caption).foregroundStyle(.secondary)
-            Divider()
-            if let settings = store.agentSettings {
-                Text("接続中の Agent のモデル設定").font(.headline)
-                Picker("モデル", selection: $selectedModel) {
-                    ForEach(settings.models) { model in Text(model.name).tag(model.id) }
-                }
-                Text("Thinkingはチャットの入力欄から変更できます。Gemma 4で利用でき、自動判定にはClef-flashの時間・使用量が発生します。")
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Niao の設定").font(.title2.bold())
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("接続先").font(.caption).foregroundStyle(.secondary)
+                    TextField("バックエンド URL", text: $url)
+                        .accessibilityIdentifier("backend-url")
+                        #if os(iOS)
+                        .keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
+                        #endif
+                    SecureField("アクセストークン", text: $token)
+                        .accessibilityIdentifier("backend-token")
+                        #if os(iOS)
+                        .textInputAutocapitalization(.never).autocorrectionDisabled()
+                        #endif
+                }.textFieldStyle(.roundedBorder).disabled(credentialBusy)
+                Button("保存済みトークンを読み込む") { Task { await loadToken() } }
+                    .disabled(credentialBusy)
+                Text(credentialDescription)
                     .font(.caption).foregroundStyle(.secondary)
-                HStack {
-                    Text("変更後の推論から適用されます。").font(.caption).foregroundStyle(.secondary)
-                    Spacer()
-                    Button("モデル設定を保存") { store.updateModelSettings(selectedModel) }
-                        .disabled(!store.connected || store.controlBusy || selectedModel.isEmpty ||
-                                  selectedModel == settings.modelId)
-                }
-            }
-            if let error = error ?? store.error { Text(error).font(.caption).foregroundStyle(.red) }
-            HStack {
-                Spacer()
-                Button("キャンセル") { dismiss() }.keyboardShortcut(.cancelAction).disabled(credentialBusy)
-                Button("保存して接続") {
-                    credentialBusy = true
-                    Task {
-                        defer { credentialBusy = false }
-                        do { try await store.saveSettings(url: url, token: token); dismiss() }
-                        catch { self.error = error.localizedDescription }
+                Divider()
+                if let settings = store.agentSettings {
+                    Text("接続中の Agent のモデル設定").font(.headline)
+                    Picker("モデル", selection: $selectedModel) {
+                        ForEach(settings.models) { model in Text(model.name).tag(model.id) }
                     }
-                }.keyboardShortcut(.defaultAction).disabled(credentialBusy)
-            }
-        }.padding(24).frame(width: 480)
+                    Text("Thinkingはチャットの入力欄から変更できます。Gemma 4・Qwen 3.8で利用でき、自動判定にはClef-flashの時間・使用量が発生します。")
+                        .font(.caption).foregroundStyle(.secondary)
+                    HStack {
+                        Text("変更後の推論から適用されます。").font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        Button("モデル設定を保存") { store.updateModelSettings(selectedModel) }
+                            .disabled(!store.connected || store.controlBusy || selectedModel.isEmpty ||
+                                      selectedModel == settings.modelId)
+                    }
+                }
+                if let error = error ?? store.error { Text(error).font(.caption).foregroundStyle(.red) }
+                HStack {
+                    Spacer()
+                    Button("キャンセル") { dismiss() }.keyboardShortcut(.cancelAction).disabled(credentialBusy)
+                    Button("保存して接続") {
+                        credentialBusy = true
+                        Task {
+                            defer { credentialBusy = false }
+                            do { try await store.saveSettings(url: url, token: token); dismiss() }
+                            catch { self.error = error.localizedDescription }
+                        }
+                    }.keyboardShortcut(.defaultAction).disabled(credentialBusy)
+                }
+            }.padding(24)
+        }
+        #if os(macOS)
+        .frame(width: 480, height: 600)
+        #endif
+        .interactiveDismissDisabled(credentialBusy)
         .onAppear {
             selectedModel = store.agentSettings?.modelId ?? ""
             url = store.backendURL
@@ -333,6 +406,13 @@ struct SettingsView: View {
             token = ""
             error = nil
         }
+    }
+    private var credentialDescription: String {
+        #if os(iOS)
+        "トークンはこのiPhoneのKeychainへ保存します。アクセス前にFace IDまたは端末のパスコードで本人確認します。"
+        #else
+        "トークンは接続先ごとに macOS Keychain へ保存します。アクセス前にTouch IDまたはMacのパスワードで本人確認します。"
+        #endif
     }
     @MainActor private func loadToken() async {
         guard !credentialBusy else { return }
@@ -348,4 +428,14 @@ struct SettingsView: View {
         catch { self.error = error.localizedDescription }
     }
 
+}
+
+private extension View {
+    @ViewBuilder func touchTarget() -> some View {
+        #if os(iOS)
+        self.frame(minWidth: 44, minHeight: 44).contentShape(Rectangle())
+        #else
+        self
+        #endif
+    }
 }

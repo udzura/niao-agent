@@ -14,6 +14,9 @@ struct UsageStatisticsView: View {
             if selection == "neurons" { NeuronStatisticsView(store: store) }
             else if selection == "workers" { PlatformStatisticsView(store: store) }
             else { ToolStatisticsView(store: store, selection: $toolSelection) }
-        }.frame(minWidth: 560, minHeight: 520)
+        }
+        #if os(macOS)
+        .frame(minWidth: 560, minHeight: 520)
+        #endif
     }
 }

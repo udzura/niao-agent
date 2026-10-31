@@ -53,5 +53,19 @@ final class NiaoCoreTests: XCTestCase {
         XCTAssertEqual(event.epoch, 2)
         XCTAssertEqual(event.settings?.modelId, "model")
     }
+    func testAIQuotaDetailsSurviveSocketAndHistoryDecoding() throws {
+        let detail = #"{"provider":"cloudflare","reason":"daily_quota_exceeded","message":"Daily quota exhausted","providerCode":4006,"httpStatus":429,"retryAt":"2026-11-01T00:00:00.000Z"}"#
+        let raw = "{\"v\":1,\"type\":\"error\",\"code\":\"ai_rate_limited\",\"details\":\(detail)}"
+        let event = try JSONDecoder().decode(ServerEvent.self, from: Data(raw.utf8))
+        let text = explanation(event.code!, details: event.details)
+        XCTAssertTrue(text.contains("10,000 Neurons"))
+        XCTAssertTrue(text.contains("日本時間9:00"))
+        XCTAssertTrue(text.contains("Cloudflare 4006"))
+        XCTAssertTrue(text.contains("HTTP 429"))
+        let turn = try JSONDecoder().decode(Turn.self, from: Data("{\"requestId\":\"r\",\"status\":\"failed\",\"errorCode\":\"ai_rate_limited\",\"errorDetails\":\(detail)}".utf8))
+        XCTAssertEqual(turn.errorDetails, event.details)
+        let legacy = try JSONDecoder().decode(Turn.self, from: Data(#"{"requestId":"r","status":"failed","errorCode":"ai_unavailable"}"#.utf8))
+        XCTAssertNil(legacy.errorDetails)
+    }
 
 }

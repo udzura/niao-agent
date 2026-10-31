@@ -1,6 +1,7 @@
 import type { ModelMessage } from "./model";
 import { ChatError } from "./protocol";
 import { validNeurons } from "./usage";
+import {workersAIError} from "./ai-errors";
 
 export type ThinkingMode = "auto" | "on" | "off";
 export interface ThinkingPolicy {
@@ -93,8 +94,10 @@ export class ClefThinkingJudge implements ThinkingJudge {
       if (score <= policy.offThreshold) return decision(false,score,"low_score");
       if (score >= policy.onThreshold) return decision(true,score,"high_score");
       return decision(policy.ambiguity === "on",score,"ambiguous");
-    } catch {
+    } catch (error) {
       signal.throwIfAborted();
+      const failure=timedOut ? new ChatError("ai_timeout") : workersAIError(error);
+      console.warn(JSON.stringify({event:"thinking.judge_error",code:failure.code,...(failure.details ? {details:failure.details} : {})}));
       return decision(true,null,timedOut ? "timeout" : "unavailable");
     } finally {
       if (timer !== undefined) clearTimeout(timer);

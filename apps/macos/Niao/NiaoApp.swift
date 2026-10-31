@@ -1,10 +1,26 @@
+#if os(macOS)
 import AppKit
+#endif
 import SwiftUI
 
 @main
 struct NiaoApp: App {
     @StateObject private var store = ChatStore()
+    #if os(iOS)
+    @Environment(\.scenePhase) private var scenePhase
+    #endif
     var body: some Scene {
+        #if os(iOS)
+        WindowGroup {
+            ChatView(store: store)
+                .task { store.start() }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            // Face ID temporarily makes the scene inactive; only background locks it.
+            if phase == .background { store.suspend() }
+            else if phase == .active { store.resume() }
+        }
+        #else
         Window("Niao", id: "chat") {
             ChatView(store: store)
                 .frame(minWidth: 480, minHeight: 520)
@@ -23,8 +39,10 @@ struct NiaoApp: App {
         MenuBarExtra("Niao", systemImage: "bird") {
             MenuContent(store: store)
         }
+        #endif
     }
 }
+#if os(macOS)
 struct MenuContent: View {
     @Environment(\.openWindow) private var openWindow
     @ObservedObject var store: ChatStore
@@ -38,3 +56,5 @@ struct MenuContent: View {
     }
     private func show() { openWindow(id: "chat"); NSApplication.shared.activate(ignoringOtherApps: true) }
 }
+
+#endif

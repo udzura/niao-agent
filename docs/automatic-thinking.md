@@ -4,7 +4,7 @@
 
 生成中にも変更できますが、実行中のターンには影響しません。設定は次回の起動・再接続後も復元します。既存のON/OFFはそれぞれ「常にON／常にOFF」、従来の既定ポリシーの自動は「自動（標準）」として表示します。新規設定の既定は「常にOFF」です。
 
-現在thinkingを生成できるモデルはGemma 4です。GLMでは設定値を保持しますが、thinkingとjudgeの呼び出しは無効です。Gemmaへ戻すと保存値が適用されます。
+現在thinkingを生成できるモデルはGemma 4とQwen 3.8 27Bです。GLMでは設定値を保持しますが、thinkingとjudgeの呼び出しは無効です。対応モデルへ戻すと保存値が適用されます。
 
 ## 判定と調整
 
@@ -72,3 +72,25 @@ judge Neurons換算値 = input_tokens × 3455 / 1,000,000
 usageを取得できない失敗・中断・タイムアウトは「使用量未取得」として件数を残します。キャンセルを無視したリクエストが後から消費した分など、取得できなかった実使用量はローカル記録に復元しません。Analyticsの全体値と併せて確認してください。
 
 `thinking.decision` ログにはモデル・スコア・ON/OFF・判定理由・durationMs・Neurons・使用量の出所のみを出します。追加Worker、追加シークレット、Dynamic Workersは不要です。適用にはAgent Workerの再デプロイとmacOSアプリの再ビルドが必要です。
+
+## Qwen 3.8 27B
+
+モデルIDは`@cf/qwen/qwen3.8-27b`です。設定のモデル一覧に追加し、通常会話・ストリーミング・既存のRuby／MCP／tools-miscツールループを共用します。
+
+| Niao設定 | Qwenへ渡す値 |
+|---|---|
+| 常にOFF | `chat_template_kwargs.enable_thinking=false`、`reasoning_effort`は省略 |
+| 常にON | `chat_template_kwargs.enable_thinking=true`、`reasoning_effort=low` |
+| 自動（3プリセット） | ターン開始時に既存のClef-flashでON/OFFを判定し、上記の値へ変換 |
+
+中間プリセットは思考を使う頻度です。思考の深さには結び付けず、ON時のeffortはすべてlowに固定します。Cloudflareの既定xhighを暗黙に使うことを避け、ツールを挟んでも既存の90秒制限に収まりやすくする初期値です。実確認ではmediumのツール往復が85秒の検証期限を超えたためlowを選びました。medium／xhighを選ぶUIや追加設定は導入していません。
+
+QwenのThinking ON時のみ`max_completion_tokens=8192`とし、思考で既存の2048トークンを消費して回答できなくなるリスクを減らします。OFFと既存モデルは2048のままです。これは出力の上限で、常に8192トークンを使うという意味ではありません。既存の90秒ターン期限・思考32,000文字の上限は保持します。複雑な依頼は依然として期限や上限に達する可能性があります。
+
+構造化SSEの`reasoning_content`／`reasoning`を思考欄へ渡し、本文に`<think>…</think>`が含まれる場合も専用ストリーミングアダプターで分離します。思考は表示・保存用として扱い、後続のLLM呼び出しやツール継続の会話本文へ再注入しません。API usageの途中値を加算せず、最終集計値で置き換えるため二重計上を避けます。
+
+仕様確認: [Cloudflareモデル仕様](https://developers.cloudflare.com/workers-ai/models/qwen3.8-27b/)、[Qwen公式モデルカード](https://huggingface.co/Qwen/Qwen3.8-27B)。Cloudflare workers-typesのモデル別型でもenable_thinkingの真偽とlow／medium／xhighを確認しています。
+
+反映はAgent Workerの再デプロイです。既存アプリはサーバーのモデル一覧とsupportsThinkingを使うため、再接続後にQwenを選べます。今回のmacOSソース変更は設定画面の説明文のみで、それを更新する場合はアプリを再ビルドします。デフォルトモデルと保存済み設定は変更しません。
+
+2026-10-30の実モデル確認では、OFFの通常会話は思考なし、ONは思考と日本語回答の分離を確認しました。さらにON/lowで実際のtools-misc Service Binding→Open-Meteo取得→Qwenによる日本語回答まで約7秒で完了しました（1回の参考値で、速度保証ではありません）。mediumでは同じツール往復が85秒の検証期限に達しました。自動3プリセット・モデル設定の永続化・各ツール継続時のパラメーターは自動テストで検証します。

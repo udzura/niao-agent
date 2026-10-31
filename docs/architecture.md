@@ -73,6 +73,8 @@ Use a random 32-byte token, shared by this one user and the Worker. Server secre
 
 Structured logs contain event names, random request/connection IDs, model identifier, duration, numeric usage, and safe error codes. The code does not serialize exceptions returned by a model provider, request headers, or message contents. SDK observability emission is disabled to keep the logged field set explicit. Worker observability storage is disabled by default; `wrangler tail` can inspect structured console events when needed. Remote AI infrastructure still processes the submitted context normally.
 
+Both native clients use the Data Protection Keychain with device-only, when-unlocked accessibility. The macOS target uses development signing and a private keychain access group. Legacy macOS credentials are copied only when the destination item is absent, verified by reading back, and retained in the old store. Migration errors never bypass the destination store. Owner authentication remains an app-level gate, rather than a biometric item ACL. See [Keychain details](keychain-auth.md).
+
 Token rotation requires updating Keychain too. Existing authenticated sockets are not immediately revoked by changing the secret; close them or restart/deploy the Worker when immediate revocation is required. This is a personal, single-user trust boundary, not a multi-tenant authorization system.
 
 ## Daily usage (2026-10-28)
@@ -138,3 +140,23 @@ D1 remains canonical. Qwen3-Embedding-0.6B (1024 dimensions) embeds overlapping 
 Development uses a separate remote Vectorize index with local Worker/D1. Offline development keeps real local keyword search and returns explicit semantic-unavailable errors. Only automated tests inject deterministic AI/vector fixtures. See [semantic setup, consistency and limitations](past-logs-semantic.md).
 
 Past LogsのCosense同期は、AgentやMCPセッションから独立したscheduled/queueハンドラーで行います。D1の発見候補をoutboxとして保持し、Queueは少なくとも1回の配送として扱います。既存DocumentServiceとSemanticIndexを使い、文書ID・FTS・意味索引の責任をスケジューラーに複製しません。設定・再開・運用は[Cosense自動同期](cosense-sync.md)を参照してください。
+
+## Miscellaneous tools
+
+`niao-tools-misc` is a static, independently deployed Worker for small network tools. NiaoAgent registers thin `AdditionalTool` adapters backed by `TOOLS_MISC` Service Binding RPC. Open-Meteo location/forecast HTTP calls, bounded response parsing and WMO descriptions belong to the service; shared input contracts belong to `apps/tools-misc/src/contracts.ts`. Location resolution and forecast retrieval are separate tool calls so ambiguous places can be clarified. The existing server-side loop, three-call budget, status notifications and client statistics apply unchanged. Only the relevant archive/weather system guidance is included for advertised tools. The service has no secrets or storage bindings and no public HTTP API. See [weather-tools.md](weather-tools.md).
+
+Kani reading tools also live behind `TOOLS_MISC`: canonical article Markdown, RSS latest-publication selection, and deterministic title substring search from the Markdown index. Latest retrieval delegates to the same bounded article reader, so metadata and content handling are shared. Article summarization and the short personal impression belong to the Agent's existing model loop, not a second model in the service. Fixed-host requests, Markdown negotiation, XML declaration rejection, Unicode pagination, untrusted-data guidance and safe errors apply. See [kani-tools.md](kani-tools.md).
+
+## Qwen 3.8 model integration
+
+The catalog includes `@cf/qwen/qwen3.8-27b` with `supportsThinking=true`. `modelThinkingOptions()` maps the existing per-turn boolean to explicit enable_thinking plus low effort when ON, and no effort parameter when OFF. The Clef decision and auto-frequency thresholds are unchanged. Only Qwen ON raises the completion cap to 8192. Structured reasoning and inline think tags are separated using the same ModelEvent/Swift disclosure/persistence path as Gemma. Stored reasoning is not replayed to the provider. Existing models retain their parameters, default model and message protocol. See [automatic-thinking.md](automatic-thinking.md).
+
+## iPhoneクライアント
+
+`apps/ios/Niao.xcodeproj`はmacOS版のSwiftソースを共有してビルドします。Agent loopや通信プロトコルはサーバー側のままです。iOSでは統計をシート表示し、バックグラウンド移行で接続と認証セッションを閉じ、復帰後に既存のHTTP/WS同期を再利用します。実機署名やFace IDを含む手順は[iOS版](ios.md)を参照してください。
+
+## Web Fetch
+
+`web_fetch_async`はAgentのSQLite outboxからCloudflare Queuesへ投入し、既存Agent Workerのconsumerがtools-miscを呼びます。結果は内部RPCでAgentへ永続化してからackし、通常ターンと共通の実行ゲートが空いたところでツールなし・Thinking OFFの要約を生成します。通知本文とジョブ完了は同一トランザクションで保存し、`message_added`で配信します。SDKの永続スケジュールが投入失敗・lease切れ・通知失敗を回復し、epochで履歴削除後の結果を除外します。詳細は[非同期Web Fetch](async-fetch.md)。
+
+`web_fetch`はtools-miscのRPCとして公開します。AgentはURLだけを送り、Tools Workerが公開URL/DNSの検証、手動redirect、本文のストリーム上限、Readability / LinkeDOM / Turndownによる抽出と出力制限を担当します。DOMを再パースせず、抽出結果を参照データとしてLLMへ返します。認証情報を外部へ渡さず、ツールWorkerにも追加の秘密やstorage bindingを持たせません。DNSの事前検査にはIP固定の保証がないため、その限界とCPUのローカル計測を[Web Fetch](web-fetch.md)に明記しています。Browser Runは追加していません。

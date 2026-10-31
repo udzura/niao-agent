@@ -36,3 +36,11 @@ describe('model-specific thinking output normalization',()=>{
     expect(modelOutputAdapter('@cf/google/gemma-4-26b-a4b-it')).toBeInstanceOf(Gemma4Adapter);
   });
 });
+
+it('separates Qwen inline thinking across every split without leaking markers',()=>{
+  const raw='<think>検討\n  中</think>回答';
+  for(let i=0;i<=raw.length;i++) expect(collect([raw.slice(0,i),raw.slice(i)],modelOutputAdapter('@cf/qwen/qwen3.8-27b'))).toEqual({thinking:'検討\n  中',content:'回答'});
+  expect(collect([...raw],modelOutputAdapter('@cf/qwen/qwen3.8-27b'))).toEqual({thinking:'検討\n  中',content:'回答'});
+  expect(collect(['通常の回答'],modelOutputAdapter('@cf/qwen/qwen3.8-27b'))).toEqual({thinking:'',content:'通常の回答'});
+  expect(collect(['<think>未完の思考'],modelOutputAdapter('@cf/qwen/qwen3.8-27b'))).toEqual({thinking:'未完の思考',content:''});
+});
