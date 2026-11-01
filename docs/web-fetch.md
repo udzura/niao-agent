@@ -54,12 +54,12 @@ PDF、画像、バイナリ、不明なContent-Typeは`web_fetch_unsupported_con
 
 | 設定 | 初期値 | 設定可能範囲 |
 |---|---:|---:|
-| `WEB_FETCH_TIMEOUT_MS` | 8,000 ms | 100–15,000 |
+| `WEB_FETCH_TIMEOUT_MS` | 8,000 ms | 100–45,000 |
 | `WEB_FETCH_MAX_REDIRECTS` | 3 | 0–5 |
-| `WEB_FETCH_MAX_DOWNLOAD_BYTES` | 32,768 bytes（32 KiB） | 1,024–524,288 |
+| `WEB_FETCH_MAX_DOWNLOAD_BYTES` | 32,768 bytes（32 KiB） | 1,024–2,097,152 |
 | `WEB_FETCH_MAX_CONTENT_CHARS` | 12,000 UTF-16単位 | 100–32,000 |
-| `WEB_FETCH_MAX_RESULT_BYTES` | 32,768 bytes（32 KiB） | 8,192–65,536 |
-| `WEB_FETCH_MAX_DOM_ELEMENTS` | 300 | 100–5,000 |
+| `WEB_FETCH_MAX_RESULT_BYTES` | 32,768 bytes（32 KiB） | 8,192–262,144 |
+| `WEB_FETCH_MAX_DOM_ELEMENTS` | 300 | 100–10,000 |
 | `WEB_FETCH_MAX_DOM_DEPTH` | 48 | 8–96 |
 
 タイムアウトはDNS・全redirect・本文読み取りを通じて1回の期限です。Content-Lengthを確認し、さらに本文ストリームを数えて上限を超えた時点でキャンセルします。ダウンロード超過はエラーにし、途中までのHTMLを記事全体として扱いません。
@@ -103,7 +103,7 @@ npm run deploy -w apps/tools-misc
 npm run deploy -w apps/worker
 ```
 
-追加secret、DB、Browser Run、Dynamic Workers、Paid専用bindingは不要。アプリのリビルドも不要です。この実装作業ではデプロイしていません。
+同期版は追加secret、DB、Browser Run、Dynamic Workers、Paid専用bindingを使いません。非同期版のBrowser bindingは[別途設定](async-fetch.md)します。アプリのリビルドも不要です。この実装作業ではデプロイしていません。
 
 ## Workers Freeでの計測
 
@@ -137,4 +137,4 @@ Apple Siliconのローカルworkerdでの一例:
 
 通常のHTTP取得だけなので、JavaScriptで後から描画される本文、ログインが必要なサイト、Bot対策に遮断されるサイトは取得できない場合があります。ページのCSSを完全には評価せず、Readabilityが本文の一部を落とすこともあります。32 KiBを超える本文や300要素を超えるHTMLは既定で拒否します。
 
-将来Browser Run等を検討するときは、ネットワーク取得と抽出の境界を使い、同じ`WebFetchResult`へ正規化できます。その際もURL・redirect検証、権限、CPU/利用料・出力上限を別途設計してください。今回はBrowser Runへの依存・fallback・汎用plugin基盤を追加していません。
+非同期`web_fetch_async`は専用の`webFetchAsync()` RPCでBrowser Run `/markdown`へ変換を委譲します。ネットワーク検証と出力制限を再利用し、同じ`WebFetchResult`へ正規化しています。同期`web_fetch`の中でBrowser Runへ自動フォールバックすることはありません。[構成・制限・デプロイ手順](async-fetch.md)。

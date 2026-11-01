@@ -13,7 +13,8 @@ export default defineConfig({
       d1Databases: {PAST_LOGS_TEST_DB: "past-logs-integration"},
       workers: [{
         name: "niao-tools-misc", compatibilityDate: "2026-10-27", compatibilityFlags:["nodejs_compat"],
-        // Only external HTTP is replaced: the actual production Worker and RPC run.
+        serviceBindings: {BROWSER:"niao-browser-test-fixture"},
+        // Only external HTTP and remote Browser Run are replaced: the actual production Worker and RPC run.
         outboundService: async (request) => {
           const url = new URL(request.url);
           if (url.origin === "https://cloudflare-dns.com" && url.pathname === "/dns-query" && url.searchParams.get("name") === "articles.example.org")
@@ -34,6 +35,9 @@ export default defineConfig({
         },
         modulesRoot: fileURLToPath(new URL("../tools-misc/build/", import.meta.url)),
         modules: [{type:"ESModule",path:fileURLToPath(new URL("../tools-misc/build/index.js",import.meta.url))}],
+      }, {
+        name: "niao-browser-test-fixture", compatibilityDate: "2026-10-27",
+        modules: [{type:"ESModule",path:fileURLToPath(new URL("./test/fixtures/browser-worker.mjs",import.meta.url))}],
       }, {
         name: "niao-past-logs",
         compatibilityDate: "2026-10-27", compatibilityFlags: ["nodejs_compat"],

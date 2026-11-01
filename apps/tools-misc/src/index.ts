@@ -1,13 +1,14 @@
 import {WorkerEntrypoint} from "cloudflare:workers";
+import {WebFetchAsyncService, type BrowserWebFetchSettings} from "./web-fetch-async";
 import {WebFetchService} from "./web-fetch";
 import type {WebFetchInput} from "./contracts";
-import type {WebFetchSettings} from "./web-resource";
 import {WeatherService} from "./weather";
 import type {LocationInput, ForecastInput} from "./contracts";
 import {KaniService} from "./kani";
 import {z} from "zod";
 import {kaniArticleInput,kaniLatestInput,kaniSearchInput} from "./contracts";
-export default class ToolsMisc extends WorkerEntrypoint<WebFetchSettings> {
+export default class ToolsMisc extends WorkerEntrypoint<BrowserWebFetchSettings> {
+  async webFetchAsync(request: WebFetchInput) { return new WebFetchAsyncService(this.env).get(request); }
   async webFetch(request: WebFetchInput) { return new WebFetchService(this.env).get(request); }
   async searchWeatherLocations(request: LocationInput) { return new WeatherService().search(request); }
   async getWeatherForecast(request: ForecastInput) { return new WeatherService().getForecast(request); }

@@ -3,28 +3,12 @@ import {DOMParser, type HTMLElement} from "linkedom/worker";
 import TurndownService from "turndown";
 import {WebFetchError, type WebLimits, validateWebUrl} from "./web-resource";
 
+import {clipCharacters, normalizeWebContent} from "./web-result";
+export {clipCharacters, normalizeWebContent} from "./web-result";
+
 export interface WebArticle {title?:string;byline?:string;excerpt?:string;content:string}
-export function clipCharacters(text: string, max: number): string {
-  const cut = text.slice(0,max);
-  return /[\uD800-\uDBFF]$/.test(cut) ? cut.slice(0,-1) : cut;
-}
 function metadata(text: string | null | undefined, max: number) {
   return text ? clipCharacters(text.replace(/\s+/g," ").trim(),max) || undefined : undefined;
-}
-export function normalizeWebContent(text: string): string {
-  const lines = text.replace(/\r\n?/g,"\n").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g,"").split("\n");
-  let fence = "", fenceSize = 0, blank = 0;
-  return lines.filter(line => {
-    const marker = line.match(/^ {0,3}(`{3,}|~{3,})/);
-    if (marker) {
-      if (!fence) { fence = marker[1][0]; fenceSize = marker[1].length; }
-      else if (marker[1][0] === fence && marker[1].length >= fenceSize && /^ {0,3}(?:`+|~+)\s*$/.test(line)) fence = "";
-      blank = 0; return true;
-    }
-    if (fence) return true;
-    blank = line.trim() ? 0 : blank+1;
-    return blank <= 1;
-  }).join("\n").replace(/^\n+|\n+$/g,"");
 }
 export function extractReadableContent(html: string, finalUrl: string, limits: WebLimits): WebArticle {
   // Cheap preflight before DOM construction; the precise node/depth guard follows.

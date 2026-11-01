@@ -50,3 +50,7 @@ Later phases can add discovery, scheduling, memory, or tools without moving thes
 ## RSSからの検索用アーカイブ同期
 
 原本・発見・配送・索引を分離すると、Agentランタイムやチャットの状態を使わず同期できる。RSSのURL/GUIDを安定IDにせず、最新ページAPIでIDを解決する。D1に候補を保存してからQueueへ送り、送信成功の記録とackは別にする。重複配送、改名、文書保存後のembedding失敗に備え、取り込みサービスと索引の進捗を再利用する。Free環境ではページ数と同時実行を制限し、CPU時間・外部モデルの割当はビルド成功とは別に検証する必要がある。
+
+
+23. Moving a job to a Queue changes when it runs, not where HTML parsing consumes CPU. Keep the synchronous fetch and browser-backed conversion behind separate RPC methods while preserving the Agent's job/result/notification contract. A Browser Run binding avoids distributing API tokens. Pass validated, bounded HTML rather than an unchecked browser URL when retaining existing redirect/DNS policy matters. Browser rendering does not remove Worker CPU limits, source/output bounds, or browser quotas.
+24. Verify provider options at the actual lifecycle boundary: a live Browser Run HTML probe executed an inline script despite the JavaScript-disable option. Strip active elements using native streaming HTMLRewriter and prepend CSP before passing HTML to the remote parser; deny browser network requests too. The same probe showed relative Markdown links were not resolved by a base element alone, so resolve them before conversion. Keep deterministic fixture tests separate from an explicit real-service smoke test.

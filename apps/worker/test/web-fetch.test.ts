@@ -194,7 +194,7 @@ describe("web_fetch network safety and bounds",()=>{
       expect(await new WebFetchService({},request).get(args)).toEqual({ok:false,error:"invalid_tool_arguments"});
     expect(request).not.toHaveBeenCalled();
     expect(webLimits()).toEqual(defaultWebLimits);
-    expect(webLimits({WEB_FETCH_TIMEOUT_MS:"999999",WEB_FETCH_MAX_REDIRECTS:"0",WEB_FETCH_MAX_DOWNLOAD_BYTES:"no"})).toMatchObject({timeoutMs:15000,maxRedirects:0,maxDownloadBytes:32768});
+    expect(webLimits({WEB_FETCH_TIMEOUT_MS:"999999",WEB_FETCH_MAX_REDIRECTS:"0",WEB_FETCH_MAX_DOWNLOAD_BYTES:"no"})).toMatchObject({timeoutMs:45000,maxRedirects:0,maxDownloadBytes:32768});
   });
 });
 

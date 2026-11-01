@@ -160,7 +160,7 @@ it("fences concurrent deliveries and stale execution results with leases",async(
 
 it("retries transient fetch failures, persists final failures, and drops malformed messages",async()=>{
   await setup();await start();const job=await payload();
-  const fake={...(env as any),TOOLS_MISC:{webFetch:async()=>({ok:false,error:"web_fetch_timeout"})}};
+  const fake={...(env as any),TOOLS_MISC:{webFetchAsync:async()=>({ok:false,error:"web_fetch_timeout"})}};
   expect((await batch(job,1,fake)).retryMessages).toHaveLength(1);
   expect((await rows())[0].status).toBe("queued");
   expect((await batch(job,5,fake)).explicitAcks).toHaveLength(1);
