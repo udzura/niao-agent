@@ -108,6 +108,7 @@ describe("automatic thinking and judge accounting",()=>{
   const usage=async()=> (await SELF.fetch(`${base}/usage`,{headers})).json<any>();
   it.each([
     [gemma,0.15,0.45,true,true], [gemma,0.35,0.65,false,true], [gemma,0.65,0.85,false,false],
+    ["@cf/qwen/qwen3-30b-a3b-fp8",0.15,0.45,true,true], ["@cf/qwen/qwen3-30b-a3b-fp8",0.35,0.65,false,true], ["@cf/qwen/qwen3-30b-a3b-fp8",0.65,0.85,false,false],
     ["@cf/qwen/qwen3.8-27b",0.15,0.45,true,true], ["@cf/qwen/qwen3.8-27b",0.35,0.65,false,true], ["@cf/qwen/qwen3.8-27b",0.65,0.85,false,false],
   ])("applies composer thresholds for %s: %s / %s to each following turn without changing the model",async(selectedModel,offThreshold,onThreshold,lowEnabled,midEnabled)=>{
     await settingsUpdate({modelId:selectedModel,thinkingMode:'on'});
@@ -276,25 +277,25 @@ describe("model settings and conversation cleanup", () => {
     expect((await SELF.fetch(`${base}/settings`, {method: "PUT", headers: {...headers, "Content-Type": "application/json"}, body: "null"})).status).toBe(400);
     expect((await SELF.fetch(`${base}/history`, {method: "DELETE", headers})).status).toBe(428);
     const settings = await (await SELF.fetch(`${base}/settings`, {headers})).json<any>();
-    expect(settings.modelId).toBe(gemma); expect(settings.models.map((x: any) => x.id)).toEqual([gemma, glm, "@cf/qwen/qwen3.8-27b"]);
+    expect(settings.modelId).toBe(gemma); expect(settings.models.map((x: any) => x.id)).toEqual([gemma, glm, "@cf/ibm-granite/granite-4.0-h-micro", "@cf/meta/llama-3.3-70b-instruct-fp8-fast", "@cf/meta/llama-4-scout-17b-16e-instruct", "@cf/qwen/qwen3-30b-a3b-fp8", "@cf/qwen/qwen3.8-27b"]);
   });
-  it("persists the selected model across eviction and uses it for subsequent inference", async () => {
-    const updated = await put(glm);
+  it.each([glm,"@cf/meta/llama-3.3-70b-instruct-fp8-fast","@cf/ibm-granite/granite-4.0-h-micro", "@cf/meta/llama-4-scout-17b-16e-instruct", "@cf/qwen/qwen3-30b-a3b-fp8"])("persists %s across eviction and uses it for inference", async selected => {
+    const updated = await put(selected);
     expect(updated.status).toBe(200); await updated.text();
     await evictDurableObject(await stub());
     const settings = await (await SELF.fetch(`${base}/settings`, {headers})).json<any>();
-    expect(settings.modelId).toBe(glm);
+    expect(settings.modelId).toBe(selected);
     await runInDurableObject(await stub(), (agent: NiaoAgent) => {
       (agent as any).createModel = (modelId: string) => ({async *stream() { yield {text: modelId}; }});
     });
     const client = await connect(); send(client.ws, crypto.randomUUID());
-    expect((await client.until(e => e.type === "committed")).messages[1].content).toBe(glm);
+    expect((await client.until(e => e.type === "committed")).messages[1].content).toBe(selected);
   });
   it("validates thinking atomically and preserves it for model-only updates", async () => {
     const get = async () => (await SELF.fetch(`${base}/settings`, {headers})).json<any>();
     const initial = await get();
     expect(initial.thinkingEnabled).toBe(false);
-    expect(initial.models.map((model:any) => model.supportsThinking)).toEqual([true,false,true]);
+    expect(initial.models.map((model:any) => model.supportsThinking)).toEqual([true,false,false,false,false,true,true]);
     for (const value of [null, "true", 1, {}, []]) {
       const response = await put(glm,value);
       expect(response.status).toBe(400);

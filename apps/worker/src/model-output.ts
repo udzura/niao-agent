@@ -110,5 +110,5 @@ export class QwenAdapter implements ModelOutputAdapter {
 }
 export function modelOutputAdapter(modelId: string): ModelOutputAdapter {
   return modelId.startsWith('@cf/google/gemma-4-') ? new Gemma4Adapter()
-    : modelId === '@cf/qwen/qwen3.8-27b' ? new QwenAdapter() : new DefaultAdapter();
+    : (modelId === '@cf/qwen/qwen3.8-27b' || modelId === '@cf/qwen/qwen3-30b-a3b-fp8') ? new QwenAdapter() : new DefaultAdapter();
 }

@@ -563,7 +563,7 @@ struct SettingsView: View {
                     Picker("モデル", selection: $selectedModel) {
                         ForEach(settings.models) { model in Text(model.name).tag(model.id) }
                     }
-                    Text("Thinkingはチャットの入力欄から変更できます。Gemma 4・Qwen 3.8で利用でき、自動判定にはClef-flashの時間・使用量が発生します。")
+                    Text("Thinkingはチャットの入力欄から変更できます。Gemma 4・Qwenで利用でき、自動判定にはClef-flashの時間・使用量が発生します。")
                         .font(.caption).foregroundStyle(.secondary)
                     HStack {
                         Text("変更後の推論から適用されます。").font(.caption).foregroundStyle(.secondary)

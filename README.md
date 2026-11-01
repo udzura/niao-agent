@@ -6,8 +6,8 @@ macOS / iPhoneで使えるパーソナル AI コンパニオンの Phase 1。Swi
 - サーバーを正とする永続履歴、カーソル同期、送信 ID による重複防止
 - HTTP と WebSocket upgrade の Bearer 認証、macOS Keychain 保存
 - 切断時の指数バックオフ、スリープ・復帰、20 秒ごとの履歴照合
-- モデル: Gemma 4（既定）/ GLM 4.7 Flash / Qwen 3.8 27B を設定画面・APIから切り替え可能
-- Gemma 4・Qwen 3.8のthinkingは回答と分離し、「思考過程」から開閉できます。再起動後も確認できます
+- モデル: Gemma 4（既定）/ GLM 4.7 Flash / Granite 4.0 H Micro / Llama 3.3 70B Fast / Llama 4 Scout 17B-16E / Qwen3 30B A3B FP8 / Qwen 3.8 27B を設定画面・APIから切り替え可能
+- Gemma 4・Qwen3・Qwen 3.8のthinkingは回答と分離し、「思考過程」から開閉できます。再起動後も確認できます
 - チャット履歴の削除（モデル設定・使用量は保持）。ニュース収集、定期実行、長期記憶は含みません
 - Web Fetch: 既知URLのHTML記事・テキスト・Markdownを取得し、読みやすい本文へ変換（[制限・安全性・デプロイ](docs/web-fetch.md)）
 - リマインダー: `set_reminder`で1分〜30日後に同じ会話へ通知（アプリを閉じていても履歴に保存。OSプッシュ通知はありません）

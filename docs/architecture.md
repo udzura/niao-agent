@@ -149,7 +149,7 @@ Kani reading tools also live behind `TOOLS_MISC`: canonical article Markdown, RS
 
 ## Qwen 3.8 model integration
 
-The catalog includes `@cf/qwen/qwen3.8-27b` with `supportsThinking=true`. `modelThinkingOptions()` maps the existing per-turn boolean to explicit enable_thinking plus low effort when ON, and no effort parameter when OFF. The Clef decision and auto-frequency thresholds are unchanged. Only Qwen ON raises the completion cap to 8192. Structured reasoning and inline think tags are separated using the same ModelEvent/Swift disclosure/persistence path as Gemma. Stored reasoning is not replayed to the provider. Existing models retain their parameters, default model and message protocol. See [automatic-thinking.md](automatic-thinking.md).
+The catalog includes `@cf/qwen/qwen3.8-27b` with `supportsThinking=true`. `modelThinkingOptions()` maps the existing per-turn boolean to explicit enable_thinking plus low effort when ON, and no effort parameter when OFF. The Clef decision and auto-frequency thresholds are unchanged. Only Qwen 3.8 ON raises the completion cap to 8192. Structured reasoning and inline think tags are separated using the same ModelEvent/Swift disclosure/persistence path as Gemma. Stored reasoning is not replayed to the provider. Existing models retain their parameters, default model and message protocol. See [automatic-thinking.md](automatic-thinking.md).
 
 ## iPhoneクライアント
 
@@ -162,3 +162,11 @@ The catalog includes `@cf/qwen/qwen3.8-27b` with `supportsThinking=true`. `model
 `web_fetch`はtools-miscのRPCとして公開します。AgentはURLだけを送り、Tools Workerが公開URL/DNSの検証、手動redirect、本文のストリーム上限、Readability / LinkeDOM / Turndownによる抽出と出力制限を担当します。DOMを再パースせず、抽出結果を参照データとしてLLMへ返します。認証情報を外部へ渡さず、ツールWorkerにも追加の秘密やstorage bindingを持たせません。DNSの事前検査にはIP固定の保証がないため、その限界とCPUのローカル計測を[Web Fetch](web-fetch.md)に明記しています。同期版はBrowser Runを呼びません。非同期版は専用の`TOOLS_MISC.webFetchAsync()`で取得・検証後のHTMLを`BROWSER.quickAction("markdown", {html})`へ渡し、DOM構築とMarkdown変換をBrowser Runへ移します。能動要素の除去・先頭CSP・ブラウザーのネットワーク拒否を併用し、最終URLとジョブ形式を維持します。Browser bindingはtools-miscだけが持ちます。詳細は[非同期Web Fetch](async-fetch.md)。
 
 `set_reminder`は分数と通知内容を受け取り、AgentのSQLiteに保存してSDKの永続スケジュールで通知します。期限とその1分後に起動を予約し、返信中は完了を待って配信します。履歴保存と通知済み状態の更新は同一トランザクションで行い、`message_added`で配信します。履歴削除時には未通知のリマインダーも削除します。1〜43200分、未通知20件まで。通知は履歴に残り、OSプッシュは行いません。実際の配信は実行状況によって遅れる場合があります。
+
+
+## Llama / Granite model integration
+
+The model catalog also includes `@cf/meta/llama-3.3-70b-instruct-fp8-fast`, `@cf/meta/llama-4-scout-17b-16e-instruct` and `@cf/ibm-granite/granite-4.0-h-micro`. All three reuse the existing SSE parsing, bounded tool loop, SQLite history and usage ledger. They advertise `supportsThinking:false`, skip the judge, and use their documented `max_tokens` option without Gemma/Qwen-specific template settings. Only provider-specific request parameters differ; no second tool runtime or client-side model list is introduced. The default model remains Gemma. See [model settings](chat-controls.md).
+
+
+Qwen3 30B A3B FP8 (`@cf/qwen/qwen3-30b-a3b-fp8`) uses the same Qwen output adapter and tool loop. Its separate request policy uses `max_tokens` (2048 OFF / 4096 ON) and Qwen's per-turn `/think` or `/no_think` soft directive on a copy of the latest user message. It does not assume the Qwen 3.8 reasoning-effort/template API is available. The directive is not persisted and does not change during tool continuations. Soft switching is best-effort; observed reasoning is always separated. See [Thinking and pricing](automatic-thinking.md#qwen3-30b-a3b-fp8).

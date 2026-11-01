@@ -4,7 +4,7 @@
 
 生成中にも変更できますが、実行中のターンには影響しません。設定は次回の起動・再接続後も復元します。既存のON/OFFはそれぞれ「常にON／常にOFF」、従来の既定ポリシーの自動は「自動（標準）」として表示します。新規設定の既定は「常にOFF」です。
 
-現在thinkingを生成できるモデルはGemma 4とQwen 3.8 27Bです。GLMでは設定値を保持しますが、thinkingとjudgeの呼び出しは無効です。対応モデルへ戻すと保存値が適用されます。
+現在thinkingを生成できるモデルはGemma 4・Qwen3 30B A3B・Qwen 3.8 27Bです。GLM・Llama・Graniteでは設定値を保持しますが、thinkingとjudgeの呼び出しは無効です。対応モデルへ戻すと保存値が適用されます。
 
 ## 判定と調整
 
@@ -85,7 +85,7 @@ usageを取得できない失敗・中断・タイムアウトは「使用量未
 
 中間プリセットは思考を使う頻度です。思考の深さには結び付けず、ON時のeffortはすべてlowに固定します。Cloudflareの既定xhighを暗黙に使うことを避け、ツールを挟んでも既存の90秒制限に収まりやすくする初期値です。実確認ではmediumのツール往復が85秒の検証期限を超えたためlowを選びました。medium／xhighを選ぶUIや追加設定は導入していません。
 
-QwenのThinking ON時のみ`max_completion_tokens=8192`とし、思考で既存の2048トークンを消費して回答できなくなるリスクを減らします。OFFと既存モデルは2048のままです。これは出力の上限で、常に8192トークンを使うという意味ではありません。既存の90秒ターン期限・思考32,000文字の上限は保持します。複雑な依頼は依然として期限や上限に達する可能性があります。
+Qwen 3.8のThinking ON時のみ`max_completion_tokens=8192`とし、思考で既存の2048トークンを消費して回答できなくなるリスクを減らします。OFFと既存モデルは2048のままです。これは出力の上限で、常に8192トークンを使うという意味ではありません。既存の90秒ターン期限・思考32,000文字の上限は保持します。複雑な依頼は依然として期限や上限に達する可能性があります。
 
 構造化SSEの`reasoning_content`／`reasoning`を思考欄へ渡し、本文に`<think>…</think>`が含まれる場合も専用ストリーミングアダプターで分離します。思考は表示・保存用として扱い、後続のLLM呼び出しやツール継続の会話本文へ再注入しません。API usageの途中値を加算せず、最終集計値で置き換えるため二重計上を避けます。
 
@@ -94,3 +94,25 @@ QwenのThinking ON時のみ`max_completion_tokens=8192`とし、思考で既存�
 反映はAgent Workerの再デプロイです。既存アプリはサーバーのモデル一覧とsupportsThinkingを使うため、再接続後にQwenを選べます。今回のmacOSソース変更は設定画面の説明文のみで、それを更新する場合はアプリを再ビルドします。デフォルトモデルと保存済み設定は変更しません。
 
 2026-10-30の実モデル確認では、OFFの通常会話は思考なし、ONは思考と日本語回答の分離を確認しました。さらにON/lowで実際のtools-misc Service Binding→Open-Meteo取得→Qwenによる日本語回答まで約7秒で完了しました（1回の参考値で、速度保証ではありません）。mediumでは同じツール往復が85秒の検証期限に達しました。自動3プリセット・モデル設定の永続化・各ツール継続時のパラメーターは自動テストで検証します。
+
+
+## Qwen3 30B A3B FP8
+
+モデルIDは`@cf/qwen/qwen3-30b-a3b-fp8`です。既存の会話・ツールループ、Thinking分離、設定保存と自動judgeを使います。通常の出力上限は`max_tokens:2048`、Thinking ONは`max_tokens:4096`です。Qwen 3.8用の`reasoning_effort`、`max_completion_tokens`、`chat_template_kwargs`は送りません。
+
+Workers AIの公開スキーマにはThinkingのhard switchが明記されていないため、Qwen公式のsoft switchを使用します。ONなら最新ユーザーメッセージのコピー末尾へ`/think`、OFFなら`/no_think`を1回付けます。自動判定の結果もこの指示へ変換し、ツール継続中は固定します。元の送信内容・SQLite履歴は書き換えません。**soft switchは厳密な強制ではありません。** OFFでもThinkingが返った場合は本文から分離して表示・保存します。コード内のトークン上限はON/OFFにかかわらず適用します。
+
+`<think>…</think>`と構造化`reasoning_content`を既存Qwenアダプターで処理します。トップレベルとOpenAI deltaに同じツール呼び出しが現れても、deltaだけを読み取り、引数連結や実行を二重にしません。新規モデルの既定選択や既存のThinking設定は変更しません。
+
+2026-11-01確認の通常トークン単価（USD / 100万トークン、キャッシュ入力を除く）:
+
+| モデル | 入力 | 出力 |
+|---|---:|---:|
+| Qwen3 30B A3B FP8 | $0.0509 | $0.335 |
+| Qwen 3.8 27B | $0.45 | $3.20 |
+
+同じトークン数なら入力は約1/9、出力は約1/10です。実際の消費はトークン数・Thinking・ツール往復回数に依存します。既存のusage集計を使い、推測値を実測Neuronsとして記録しません。
+
+[Cloudflare: Qwen3](https://developers.cloudflare.com/workers-ai/models/qwen3-30b-a3b-fp8/)、[Cloudflare: Qwen 3.8](https://developers.cloudflare.com/workers-ai/models/qwen3.8-27b/)、[Qwen公式のThinking切り替え](https://huggingface.co/Qwen/Qwen3-30B-A3B#advanced-usage-switching-between-thinking-and-non-thinking-modes-via-user-input)。
+
+設定一覧・保存復元・自動判定・SSE分割・ツール継続はローカルのfixtureテストで確認します。実APIの生成・soft switch追従性はCloudflare認証を用意して別途検証する必要があります。

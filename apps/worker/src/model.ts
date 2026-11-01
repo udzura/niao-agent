@@ -6,6 +6,10 @@ import type { AdditionalTool } from "./past-logs";
 export const MODELS = [
   { id: "@cf/google/gemma-4-26b-a4b-it", name: "Gemma 4 · 26B A4B", supportsThinking: true },
   { id: "@cf/zai-org/glm-4.7-flash", name: "GLM 4.7 Flash", supportsThinking: false },
+  { id: "@cf/ibm-granite/granite-4.0-h-micro", name: "Granite 4.0 H Micro", supportsThinking: false },
+  { id: "@cf/meta/llama-3.3-70b-instruct-fp8-fast", name: "Llama 3.3 · 70B Fast", supportsThinking: false },
+  { id: "@cf/meta/llama-4-scout-17b-16e-instruct", name: "Llama 4 Scout · 17B-16E", supportsThinking: false },
+  { id: "@cf/qwen/qwen3-30b-a3b-fp8", name: "Qwen3 · 30B A3B FP8", supportsThinking: true },
   { id: "@cf/qwen/qwen3.8-27b", name: "Qwen 3.8 · 27B", supportsThinking: true },
 ] as const;
 export type ModelID = typeof MODELS[number]["id"];
@@ -19,6 +23,14 @@ export function supportsThinking(modelId: ModelID): boolean {
 // Auto presets control whether to think, not reasoning depth. Keep the enabled
 // Qwen effort explicit instead of inheriting its expensive xhigh default.
 export function modelThinkingOptions(modelId: ModelID, enabled: boolean) {
+  // Qwen3's published Workers AI schema uses max_tokens and has no documented
+  // template/effort options. Its per-turn soft switch is added to messages below.
+  if (modelId === "@cf/qwen/qwen3-30b-a3b-fp8") return {max_tokens:enabled ? 4096 : 2048};
+  // These Workers AI endpoints use the legacy text-generation parameters.
+  // Do not send Gemma/Qwen template flags or max_completion_tokens to them.
+  if (modelId === "@cf/meta/llama-3.3-70b-instruct-fp8-fast" || modelId === "@cf/ibm-granite/granite-4.0-h-micro" ||
+      modelId === "@cf/meta/llama-4-scout-17b-16e-instruct")
+    return {max_tokens:2048};
   const thinking = enabled && supportsThinking(modelId);
   return {
     chat_template_kwargs: { enable_thinking: thinking },
@@ -39,6 +51,14 @@ export class WorkersAIModel implements ChatModel {
     private additionalTools: AdditionalTool[] = []) { }
   async *stream(messages: ModelMessage[], signal: AbortSignal): AsyncIterable<ModelEvent> {
     const conversation: any[] = [...messages];
+    if (this.modelId === "@cf/qwen/qwen3-30b-a3b-fp8") {
+      let index=conversation.length-1;
+      while (index >= 0 && conversation[index].role !== "user") index--;
+      // Append once to a copy of this turn's latest request, not persisted history
+      // or tool results. It remains fixed across all tool continuations.
+      if (index >= 0) conversation[index]={...conversation[index],content:conversation[index].content +
+        (this.thinkingEnabled ? "\n\n/think" : "\n\n/no_think")};
+    }
     const tools = [...(this.executeRuby ? [rubyTool] : []), ...this.additionalTools.map(tool => tool.definition)];
     if (this.additionalTools.length) {
       const archiveGuidance = "Past Logs tools search the user's historical writing. Use them when relevant to past articles or personal history. " +
