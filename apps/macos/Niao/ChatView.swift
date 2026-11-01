@@ -306,7 +306,7 @@ struct ChatView: View {
                     inputFocused = false
                     thinkingPresented = true
                 } label: {
-                    Image(systemName: "brain")
+                    Image(systemName: (store.agentSettings?.thinkingChoice ?? .off) == .off ? "lightbulb" : "lightbulb.fill")
                         .foregroundStyle((store.agentSettings?.thinkingChoice ?? .off) == .off ? Color.secondary : Color.accentColor)
                         .touchTarget()
                 }
