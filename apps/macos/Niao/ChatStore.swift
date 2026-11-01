@@ -14,6 +14,7 @@ final class ChatStore: ObservableObject {
     private var statisticsWritable = true
     @Published var agentSettings: AgentSettings?
     @Published var controlBusy = false
+    @Published var backgroundJobs: BackgroundJobsSnapshot?
     @Published var runningToolName: String?
     private var historyEpoch: Int?
     @Published var messages: [ChatMessage] = []
@@ -91,7 +92,7 @@ final class ChatStore: ObservableObject {
         backendURL = valid
         UserDefaults.standard.set(valid, forKey: "backendURL")
         messages = []; cursor = 0; turns = []; partial = nil
-        historyEpoch = nil; agentSettings = nil
+        historyEpoch = nil; agentSettings = nil; backgroundJobs = nil
         toolToast.clear()
         usage = nil; usageError = nil; usageRefreshAt = nil
         platformUsage = nil; platformUsageError = nil
@@ -203,6 +204,7 @@ final class ChatStore: ObservableObject {
             let page = try await backend.history(after: cursor, epoch: historyEpoch)
             guard generation == id, !Task.isCancelled else { throw CancellationError() }
             guard acceptEpoch(page.epoch ?? 0) else { continue }
+            if let jobs = page.jobs { acceptJobs(jobs) } else { backgroundJobs = nil }
             messages = mergeMessages(messages, page.messages)
             cursor = page.cursor
             // A response started before a socket event must not roll back its status.
@@ -219,6 +221,7 @@ final class ChatStore: ObservableObject {
         guard event.v == 1 else { return } // Ignore SDK housekeeping if introduced later.
         guard acceptEpoch(event.epoch ?? 0) else { return }
         eventRevision += 1
+        acceptJobs(event.jobs)
         switch event.type {
         case "tool_status":
             if event.status == "running" {
@@ -277,6 +280,10 @@ final class ChatStore: ObservableObject {
         default: break
         }
     }
+    private func acceptJobs(_ snapshot: BackgroundJobsSnapshot?) {
+        guard let snapshot else { return }
+        backgroundJobs = backgroundJobs?.accepting(snapshot) ?? snapshot
+    }
     private func finishToolTurn(_ event: ServerEvent) {
         if let requestID = event.requestId {
             toolStatistics.finishTurn(backend: backendURL, epoch: event.epoch ?? 0, requestID: requestID)
@@ -293,6 +300,7 @@ final class ChatStore: ObservableObject {
         if let current = historyEpoch, incoming < current { return false }
         if let current = historyEpoch, incoming > current {
             messages = []; turns = []; partial = nil; cursor = 0; draft = ""
+            backgroundJobs = nil
             runningToolName = nil
             toolToast.clear()
         }

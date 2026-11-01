@@ -114,3 +114,26 @@ Legacy `thinkingEnabled:true/false` updates remain accepted as manual `on/off`; 
 `DELETE /agents/niao-agent/personal/history` requires `If-Match: "<epoch>"`, using the numeric epoch from settings/history. Missing or malformed preconditions return 428 `precondition_required`, stale epochs return 409 `history_changed`, and active inference returns 409 `busy`. Success atomically deletes messages/turns and increments the epoch, then broadcasts `history_cleared` and returns `{v,epoch}`. Model selection, usage records, and the monotonically increasing SQLite sequence remain intact. Repeating an old DELETE cannot clear a newly started conversation.
 
 Clients send the current epoch with each submission and HTTP history query. An epoch mismatch on history resets the server-side cursor to zero; the client must reset its cache before merging the new epoch. Ignore older-epoch HTTP responses and buffered socket events. Drop persisted outbox submissions belonging to an older epoch. Mismatching submissions are rejected as `history_changed` before deduplication or generation. Missing epochs are treated as zero for compatibility until the first cleanup; upgrade older clients before clearing history. See [API examples](chat-controls.md).
+
+### Background job snapshots
+
+Authenticated `GET /agents/niao-agent/personal/jobs` returns `{v:1, epoch, jobs}`.
+`jobs` is also included in HTTP history, WebSocket `ready`, and the new
+`jobs_updated` event. It contains `{revision, items}`; each item has `id`, `kind`
+(`web_fetch` or `reminder`), `title`, `status`, and an optional ISO `dueAt`.
+Fetch titles contain only the hostname; reminder titles are limited to 100 Unicode
+characters. Article bodies, queue lease tokens and execution results are omitted.
+
+Only unfinished work is listed. Fetch states are `pending`, `queued`, `running`,
+`ready`, `notifying`, and `retry_wait`; reminders use `scheduled` with `dueAt`.
+`ready` means waiting for an idle conversation; `retry_wait` means a notification
+attempt did not finish. Jobs disappear after their notification is persisted, or
+when history is cleared. A past-due reminder may wait for the current conversation
+to finish. This API does not cancel or modify jobs.
+
+The revision is persisted in the Agent's SQLite storage and increases on state
+updates and isolate startup. Clients accept snapshots only within the current
+history epoch and ignore lower revisions, including buffered WebSocket events
+received after a newer HTTP snapshot. The existing history sync restores the list
+after reconnect without adding another polling loop. Older servers may omit
+`jobs`; clients then hide the indicator. No external D1 migration is needed.

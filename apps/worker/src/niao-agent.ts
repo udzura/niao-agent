@@ -10,6 +10,7 @@ import { PlatformAnalytics } from "./platform-usage";
 import { miscTools } from "./misc-tools";
 import { withPastLogsTools, type AdditionalTool } from "./past-logs";
 import {asyncFetchTool,fetchJobMessage,fetchJobResult,jobLimits,type FetchJob,type FetchJobMessage,type FetchJobResult} from "./fetch-jobs";
+import {reminderTool} from "./reminder";
 import {validateWebUrl} from "../../tools-misc/src/web-resource";
 
 type Active = { requestId: string; text: string; thinking?: ThinkingSegment[] };
@@ -48,6 +49,15 @@ export class NiaoAgent extends Agent<Env> {
       UNIQUE(epoch,requestId,url)
     )`;
     this.sql`CREATE INDEX IF NOT EXISTS niao_fetch_jobs_pending ON niao_fetch_jobs(status,epoch)`;
+    this.sql`CREATE TABLE IF NOT EXISTS niao_job_state (id INTEGER PRIMARY KEY, revision INTEGER NOT NULL)`;
+    this.sql`INSERT OR IGNORE INTO niao_job_state VALUES (1,0)`;
+    // A resumed isolate no longer has an active summary; invalidate old snapshots.
+    this.sql`UPDATE niao_job_state SET revision=revision+1 WHERE id=1`;
+    this.sql`CREATE TABLE IF NOT EXISTS niao_reminders (
+      id TEXT PRIMARY KEY, epoch INTEGER NOT NULL, requestId TEXT NOT NULL,
+      minutes INTEGER NOT NULL, message TEXT NOT NULL, dueAt INTEGER NOT NULL, status TEXT NOT NULL,
+      UNIQUE(epoch,requestId,minutes,message)
+    )`;
     this.sql`CREATE TABLE IF NOT EXISTS niao_usage_attempts (
       id TEXT PRIMARY KEY, startedAt TEXT NOT NULL, neurons REAL
     )`;
@@ -83,7 +93,7 @@ export class NiaoAgent extends Agent<Env> {
   shouldConnectionBeReadonly() { return true; }
   shouldSendProtocolMessages() { return false; }
   onConnect(connection: Connection, _context: ConnectionContext) {
-    this.send(connection, {type: "ready", bootId: this.bootId, active: this.active});
+    this.send(connection, {type: "ready", bootId: this.bootId, active: this.active, jobs: this.jobsSnapshot()});
     log("connection.open", {connectionId: connection.id});
   }
   onClose(connection: Connection, code: number) { log("connection.close", {connectionId: connection.id, code}); }
@@ -129,12 +139,15 @@ export class NiaoAgent extends Agent<Env> {
         this.sql`DELETE FROM niao_turns`;
         this.sql`DELETE FROM niao_thinking`;
         this.sql`DELETE FROM niao_fetch_jobs`;
+        this.sql`DELETE FROM niao_reminders`;
         this.sql`UPDATE niao_settings SET epoch = epoch + 1 WHERE id = 1`;
       });
       this.publish({type: "history_cleared"});
+      this.publishJobs();
       return this.json({v: 1, epoch: this.settings().epoch});
     }
     if (request.method !== "GET") return this.json({code: "method_not_allowed"}, 405);
+    if (url.pathname.endsWith("/jobs")) return this.json({v:1,epoch:this.settings().epoch,jobs:this.jobsSnapshot()});
     if (url.pathname.endsWith("/usage")) return this.usageResponse();
     if (url.pathname.endsWith("/platform-usage")) {
       let snapshot = await this.platformAnalytics.today();
@@ -148,7 +161,7 @@ export class NiaoAgent extends Agent<Env> {
     if (Number(url.searchParams.get("epoch") ?? "0") !== settings.epoch) after = 0;
     const rows = this.sql<Message>`SELECT * FROM niao_messages WHERE seq > ${after} ORDER BY seq LIMIT 101`;
     const messages = this.withThinking(rows.slice(0, 100));
-    return Response.json({v: 1, epoch: settings.epoch, settings: this.settingsResponse(), messages, cursor: messages.at(-1)?.seq ?? after, hasMore: rows.length > 100,
+    return Response.json({v: 1, epoch: settings.epoch, settings: this.settingsResponse(), jobs: this.jobsSnapshot(), messages, cursor: messages.at(-1)?.seq ?? after, hasMore: rows.length > 100,
       turns: this.sql<{requestId:string;status:Turn["status"];errorCode:string|null;errorDetails:string|null}>`SELECT * FROM niao_turns WHERE status != 'completed'`
         .map(({errorDetails,...turn})=>({...turn,...(errorDetails ? {errorDetails:JSON.parse(errorDetails)} : {})})), active: this.active,
     }, {headers: {"Cache-Control": "no-store"}});
@@ -201,6 +214,79 @@ export class NiaoAgent extends Agent<Env> {
     return new WorkersAIModel(this.env.AI,modelId,undefined,false,[]);
   }
 
+  private jobsSnapshot() {
+    const epoch = this.settings().epoch;
+    const fetches = this.sql<Pick<FetchJob,"id"|"url"|"status"|"notificationAttempts">>`SELECT id,url,status,notificationAttempts FROM niao_fetch_jobs WHERE epoch=${epoch} AND status NOT IN ('notified','cancelled') ORDER BY createdAt,id`;
+    const reminders = this.sql<{id:string;message:string;dueAt:number}>`SELECT id,message,dueAt FROM niao_reminders WHERE epoch=${epoch} AND status='pending' ORDER BY dueAt,id`;
+    return {
+      revision: this.sql<{revision:number}>`SELECT revision FROM niao_job_state WHERE id=1`[0].revision,
+      items: [
+        ...fetches.map(job => ({
+          id:job.id, kind:"web_fetch", title:new URL(job.url).hostname,
+          status:this.active?.requestId === `notification:${job.id}` ? "notifying" :
+            job.status === "ready" && job.notificationAttempts > 0 ? "retry_wait" : job.status,
+        })),
+        ...reminders.map(job => ({id:job.id,kind:"reminder",title:Array.from(job.message).slice(0,100).join(""),
+          status:"scheduled",dueAt:new Date(job.dueAt).toISOString()})),
+      ],
+    };
+  }
+  private publishJobs() {
+    this.sql`UPDATE niao_job_state SET revision=revision+1 WHERE id=1`;
+    this.publish({type:"jobs_updated",jobs:this.jobsSnapshot()});
+  }
+
+  async enqueueReminder(minutes:number,message:string,requestId:string,epoch:number) {
+    if (this.settings().epoch !== epoch || this.active?.requestId !== requestId) return {ok:false,error:"history_changed"};
+    const existing = this.sql<{id:string;dueAt:number}>`SELECT id,dueAt FROM niao_reminders WHERE epoch=${epoch} AND requestId=${requestId} AND minutes=${minutes} AND message=${message}`[0];
+    if (existing) return {ok:true,jobId:existing.id,dueAt:new Date(existing.dueAt).toISOString()};
+    if (this.sql<{n:number}>`SELECT COUNT(*) AS n FROM niao_reminders WHERE status='pending'`[0].n >= 20) return {ok:false,error:"reminder_limit"};
+    const jobId=crypto.randomUUID(), dueAt=Date.now()+minutes*60_000;
+    // Recovery is registered first, so every saved job has a durable wakeup.
+    const recovery=await this.schedule(new Date(dueAt+60_000),"maintainReminder",{jobId});
+    try {
+      await this.schedule(new Date(dueAt),"maintainReminder",{jobId});
+      if (this.settings().epoch !== epoch || this.active?.requestId !== requestId) {
+        await this.cancelSchedule(recovery.id); return {ok:false,error:"history_changed"};
+      }
+      const duplicate=this.sql<{id:string;dueAt:number}>`SELECT id,dueAt FROM niao_reminders WHERE epoch=${epoch} AND requestId=${requestId} AND minutes=${minutes} AND message=${message}`[0];
+      if (duplicate) { await this.cancelSchedule(recovery.id); return {ok:true,jobId:duplicate.id,dueAt:new Date(duplicate.dueAt).toISOString()}; }
+      if (this.sql<{n:number}>`SELECT COUNT(*) AS n FROM niao_reminders WHERE status='pending'`[0].n >= 20) {
+        await this.cancelSchedule(recovery.id); return {ok:false,error:"reminder_limit"};
+      }
+      this.sql`INSERT INTO niao_reminders VALUES (${jobId},${epoch},${requestId},${minutes},${message},${dueAt},'pending')`;
+      this.publishJobs();
+      return {ok:true,jobId,dueAt:new Date(dueAt).toISOString()};
+    } catch (error) { await this.cancelSchedule(recovery.id); throw error; }
+  }
+
+  async maintainReminder(payload:{jobId:string},schedule?:{id:string}) {
+    const job=this.sql<{epoch:number;dueAt:number;status:string}>`SELECT epoch,dueAt,status FROM niao_reminders WHERE id=${payload.jobId}`[0];
+    if (job && job.epoch === this.settings().epoch && job.status === 'pending' && job.dueAt <= Date.now()) {
+      if (this.active) await this.schedule(new Date(Date.now()+60_000),"maintainReminder",payload);
+      else this.deliverReminders();
+    }
+    const remaining=this.sql<{status:string}>`SELECT status FROM niao_reminders WHERE id=${payload.jobId}`[0];
+    if ((!remaining || remaining.status !== 'pending') && schedule) await this.cancelSchedule(schedule.id);
+  }
+
+  private deliverReminders() {
+    if (this.active) return;
+    const epoch=this.settings().epoch;
+    const jobs=this.sql<{id:string;message:string}>`SELECT id,message FROM niao_reminders WHERE epoch=${epoch} AND status='pending' AND dueAt <= ${Date.now()} ORDER BY dueAt,id`;
+    for (const job of jobs) {
+      const requestId=`reminder:${job.id}`, text=`リマインダー: ${job.message}`;
+      const message=this.ctx.storage.transactionSync(()=>{
+        this.sql`INSERT OR IGNORE INTO niao_turns (requestId,status) VALUES (${requestId},'completed')`;
+        this.sql`INSERT OR IGNORE INTO niao_messages (id,requestId,role,content,createdAt) VALUES (${requestId},${requestId},'assistant',${text},${new Date().toISOString()})`;
+        this.sql`UPDATE niao_reminders SET status='notified' WHERE id=${job.id}`;
+        return this.sql<Message>`SELECT * FROM niao_messages WHERE id=${requestId}`[0];
+      });
+      this.publish({type:"message_added",requestId,message});
+    }
+    if (jobs.length) this.publishJobs();
+  }
+
   async enqueueFetchJob(url:string,requestId:string,epoch:number) {
     if (!this.env.FETCH_JOBS || !this.env.TOOLS_MISC) return {ok:false,error:"web_fetch_async_unavailable"};
     url = validateWebUrl(url).href;
@@ -224,6 +310,7 @@ export class NiaoAgent extends Agent<Env> {
     const now = Date.now();
     this.sql`INSERT INTO niao_fetch_jobs (id,epoch,requestId,url,status,createdAt,updatedAt)
       VALUES (${jobId},${epoch},${requestId},${url},'pending',${now},${now})`;
+    this.publishJobs();
     log("fetch_job.created",{jobId,requestId});
     await this.dispatchFetchJob(jobId);
     return {ok:true,jobId,status:this.job(jobId)?.status ?? "pending"};
@@ -241,14 +328,17 @@ export class NiaoAgent extends Agent<Env> {
     if (job.status === "queued" && now-job.updatedAt < jobLimits.redispatchMs || job.status === "running" && job.leaseUntil > now) return;
     if (now-job.createdAt >= jobLimits.lifetimeMs || job.dispatchAttempts >= jobLimits.dispatches) {
       this.sql`UPDATE niao_fetch_jobs SET status='ready',result=${JSON.stringify({ok:false,error:"web_fetch_job_expired"})},runToken=NULL WHERE id=${id}`;
+      this.publishJobs();
       return;
     }
     this.sql`UPDATE niao_fetch_jobs SET status='queued',updatedAt=${now},dispatchAttempts=dispatchAttempts+1,runToken=NULL WHERE id=${id}`;
+    this.publishJobs();
     try {
       await this.sendFetchJob({v:1,kind:"web_fetch",jobId:id,epoch:job.epoch});
       log("fetch_job.enqueued",{jobId:id});
     } catch {
       this.sql`UPDATE niao_fetch_jobs SET status='pending' WHERE id=${id} AND status='queued' AND dispatchAttempts=${job.dispatchAttempts+1}`;
+      this.publishJobs();
       log("fetch_job.enqueue_failed",{jobId:id});
     }
   }
@@ -264,12 +354,14 @@ export class NiaoAgent extends Agent<Env> {
     if (job.status === "running" && job.leaseUntil > now) return {action:"busy"};
     const token = crypto.randomUUID();
     this.sql`UPDATE niao_fetch_jobs SET status='running',runToken=${token},leaseUntil=${now+jobLimits.leaseMs},updatedAt=${now} WHERE id=${job.id}`;
+    this.publishJobs();
     log("fetch_job.started",{jobId:job.id});
     return {action:"run",token,url:job.url};
   }
   releaseFetchJob(input:FetchJobMessage,token:string) {
     this.sql`UPDATE niao_fetch_jobs SET status='queued',runToken=NULL,leaseUntil=0,updatedAt=${Date.now()}
       WHERE id=${input.jobId} AND epoch=${input.epoch} AND runToken=${token} AND status='running'`;
+    this.publishJobs();
   }
   async completeFetchJob(input:FetchJobMessage,token:string,result:FetchJobResult) {
     fetchJobMessage.parse(input);
@@ -277,6 +369,7 @@ export class NiaoAgent extends Agent<Env> {
     const job = this.job(input.jobId);
     if (!job || job.epoch !== input.epoch || job.epoch !== this.settings().epoch || job.runToken !== token || job.status !== "running") return;
     this.sql`UPDATE niao_fetch_jobs SET status='ready',runToken=NULL,leaseUntil=0,result=${JSON.stringify(value)},updatedAt=${Date.now()} WHERE id=${job.id}`;
+    this.publishJobs();
     log("fetch_job.result_saved",{jobId:job.id,ok:value.ok,...(!value.ok ? {code:value.error} : {})});
     try { await this.queue("deliverFetchNotifications",null); }
     catch { log("fetch_job.notification_wake_failed",{jobId:job.id}); } // Per-job schedule remains durable.
@@ -303,6 +396,7 @@ export class NiaoAgent extends Agent<Env> {
     const requestId = `notification:${job.id}`;
     this.active = {requestId,text:""};
     this.sql`UPDATE niao_fetch_jobs SET notificationAttempts=notificationAttempts+1,notificationAfter=${Date.now()+60_000} WHERE id=${job.id}`;
+    this.publishJobs();
     this.publish({type:"partial",requestId,text:""});
     const controller = new AbortController();
     const started = Date.now();
@@ -351,6 +445,8 @@ export class NiaoAgent extends Agent<Env> {
     } finally {
       if (timer !== undefined) clearTimeout(timer);
       controller.abort(); this.active = null;
+      this.publishJobs();
+      this.deliverReminders();
     }
   }
 
@@ -450,7 +546,8 @@ export class NiaoAgent extends Agent<Env> {
         }
         controller.signal.throwIfAborted();
         attemptId = startAttempt();
-        const turnTools = this.env.FETCH_JOBS ? [...tools,asyncFetchTool(url=>this.enqueueFetchJob(url,requestId,this.settings().epoch))] : tools;
+        const turnTools = [...tools,reminderTool((minutes,message)=>this.enqueueReminder(minutes,message,requestId,this.settings().epoch)),
+          ...(this.env.FETCH_JOBS ? [asyncFetchTool(url=>this.enqueueFetchJob(url,requestId,this.settings().epoch))] : [])];
         for await (const part of this.createModel(modelId, thinkingEnabled, turnTools).stream(boundedContext(recent), controller.signal)) {
           controller.signal.throwIfAborted();
           if ("text" in part) {
@@ -505,6 +602,7 @@ export class NiaoAgent extends Agent<Env> {
       if (timer !== undefined) clearTimeout(timer);
       controller.abort();
       this.active = null;
+      this.deliverReminders();
       // Notify only after the initiating turn (including an error) has ended.
       if (this.sql<{id:string}>`SELECT id FROM niao_fetch_jobs WHERE status='ready' LIMIT 1`.length) {
         try { await this.queue("deliverFetchNotifications",null); } catch { /* Durable per-job recovery schedule. */ }

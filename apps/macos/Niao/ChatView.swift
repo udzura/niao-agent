@@ -9,16 +9,23 @@ struct ChatView: View {
     @Environment(\.openWindow) private var openWindow
     #else
     @State private var statisticsPresented = false
+    @State private var menuPresented = false
+    @State private var thinkingPresented = false
     #endif
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var multiline = false
     @State private var confirmClear = false
+    @State private var jobsPresented = false
     @FocusState private var inputFocused: Bool
     var body: some View {
         VStack(spacing: 0) {
+            #if os(iOS)
+            mobileHeader
+            #else
             HStack(spacing: 7) {
                 Circle().fill(store.connected ? Color.green : Color.secondary).frame(width: 7, height: 7)
                 Text(store.connection).font(.caption).foregroundStyle(.secondary)
+                backgroundJobsButton
                 Spacer()
                 if !store.connected { Button("再接続") { store.reconnect() } }
                 Button { showStatistics() } label: { Image(systemName: "chart.bar").touchTarget() }
@@ -28,6 +35,7 @@ struct ChatView: View {
                 Button { store.settingsPresented = true } label: { Image(systemName: "gearshape").touchTarget() }.help("設定").accessibilityLabel("設定")
             }.padding(12)
             UsageView(store: store)
+            #endif
             Divider()
             ScrollViewReader { proxy in
                 ScrollView {
@@ -63,6 +71,8 @@ struct ChatView: View {
                 .onChange(of: store.messages.count) { _, _ in proxy.scrollTo("bottom", anchor: .bottom) }
                 .onChange(of: store.partial?.text) { _, _ in proxy.scrollTo("bottom", anchor: .bottom) }
                 #if os(iOS)
+                .contentShape(Rectangle())
+                .simultaneousGesture(TapGesture().onEnded { inputFocused = false })
                 .scrollDismissesKeyboard(.interactively)
                 .onChange(of: inputFocused) { _, focused in if focused { proxy.scrollTo("bottom", anchor: .bottom) } }
                 #endif
@@ -87,6 +97,9 @@ struct ChatView: View {
             Divider()
             messageComposer
         }
+        .onChange(of: store.backgroundJobs?.items.isEmpty) { _, empty in
+            if empty != false { jobsPresented = false }
+        }
         .alert("チャット履歴を削除しますか？", isPresented: $confirmClear) {
             Button("キャンセル", role: .cancel) {}
             Button("履歴を削除", role: .destructive) { store.clearHistory() }
@@ -105,6 +118,51 @@ struct ChatView: View {
         }
         #endif
     }
+    @ViewBuilder private var backgroundJobsButton: some View {
+        if let snapshot = store.backgroundJobs, !snapshot.items.isEmpty {
+            Button {
+                inputFocused = false
+                jobsPresented = true
+            } label: {
+                Label("\(snapshot.items.count)件", systemImage: "clock.arrow.circlepath")
+                    .font(.caption).touchTarget()
+            }
+            .buttonStyle(.plain).foregroundStyle(store.connected ? Color.accentColor : Color.secondary)
+            .accessibilityLabel("バックグラウンドのジョブ")
+            .accessibilityValue("\(snapshot.items.count)件" + (store.connected ? "" : "、前回取得値"))
+            .popover(isPresented: $jobsPresented) {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("バックグラウンド").font(.headline)
+                    if !store.connected {
+                        Text("前回取得した状態です。再接続すると更新します。")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 16) {
+                            ForEach(store.backgroundJobs?.items ?? []) { job in
+                                VStack(alignment: .leading, spacing: 5) {
+                                    Label(job.label, systemImage: job.icon).font(.subheadline.weight(.semibold))
+                                    Text(verbatim: job.title).font(.subheadline).lineLimit(3)
+                                    Text(job.statusLabel).font(.caption).foregroundStyle(.secondary)
+                                    if let due = job.scheduledDate {
+                                        Text(due, format: .dateTime.month().day().hour().minute())
+                                            .font(.caption).foregroundStyle(.secondary)
+                                        if due <= Date() {
+                                            Text("会話の区切りで通知します").font(.caption).foregroundStyle(.secondary)
+                                        }
+                                    }
+                                }.frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
+                    }.frame(maxHeight: 320)
+                }
+                .padding(20).frame(width: 320)
+                #if os(iOS)
+                .presentationCompactAdaptation(.popover)
+                #endif
+            }
+        }
+    }
     private func showStatistics() {
         #if os(macOS)
         openWindow(id: "usage-statistics")
@@ -113,7 +171,14 @@ struct ChatView: View {
         statisticsPresented = true
         #endif
     }
-    private var messageComposer: some View {
+    @ViewBuilder private var messageComposer: some View {
+        #if os(iOS)
+        mobileComposer
+        #else
+        desktopComposer
+        #endif
+    }
+    private var desktopComposer: some View {
         VStack(alignment: .leading, spacing: 10) {
             ThinkingSlider(store: store)
             HStack(alignment: .bottom, spacing: 12) {
@@ -167,6 +232,118 @@ struct ChatView: View {
             }
         }.padding(16)
     }
+    #if os(iOS)
+    private var mobileHeader: some View {
+        HStack(spacing: 7) {
+            Circle().fill(store.connected ? Color.green : Color.secondary).frame(width: 7, height: 7)
+            Text(store.connection).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            backgroundJobsButton
+            Spacer()
+            Button {
+                inputFocused = false
+                menuPresented = true
+            } label: {
+                Image(systemName: "line.3.horizontal").touchTarget()
+            }
+            .accessibilityLabel("チャットメニュー")
+            .popover(isPresented: $menuPresented, arrowEdge: .top) {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Niao").font(.headline).padding(.horizontal, 12)
+                    UsageView(store: store)
+                    Divider()
+                    menuAction("利用状況統計を開く", icon: "chart.bar") { showStatistics() }
+                    menuAction("設定", icon: "gearshape") { store.settingsPresented = true }
+                    if !store.connected {
+                        menuAction("再接続", icon: "arrow.clockwise") { store.reconnect() }
+                    }
+                    Divider()
+                    Button(role: .destructive) {
+                        menuPresented = false
+                        confirmClear = true
+                    } label: {
+                        Label("チャット履歴を削除", systemImage: "trash")
+                            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                            .contentShape(Rectangle())
+                    }
+                    .disabled(!store.connected || store.busy || store.controlBusy)
+                }
+                .buttonStyle(.plain).padding(16).frame(width: 320)
+                .presentationCompactAdaptation(.popover)
+            }
+        }.padding(.horizontal, 16)
+    }
+    private func menuAction(_ title: String, icon: String, action: @escaping () -> Void) -> some View {
+        Button {
+            menuPresented = false
+            action()
+        } label: {
+            Label(title, systemImage: icon)
+                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                .contentShape(Rectangle())
+        }
+    }
+    private var mobileComposer: some View {
+        VStack(spacing: 6) {
+            if multiline {
+                multilineInput
+                    .frame(height: 100)
+                    .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 12))
+                    .transition(.opacity)
+            }
+            HStack(alignment: .center, spacing: 2) {
+                if multiline {
+                    Text("改行できます").font(.caption).foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
+                } else {
+                    TextField("メッセージを入力", text: $store.draft)
+                        .textFieldStyle(.plain).focused($inputFocused).submitLabel(.send)
+                        .onSubmit { store.send() }
+                        .accessibilityIdentifier("message-input")
+                        .frame(minHeight: 44)
+                        .transition(.opacity)
+                }
+                Button {
+                    inputFocused = false
+                    thinkingPresented = true
+                } label: {
+                    Image(systemName: "brain")
+                        .foregroundStyle((store.agentSettings?.thinkingChoice ?? .off) == .off ? Color.secondary : Color.accentColor)
+                        .touchTarget()
+                }
+                .accessibilityLabel("Thinkingを調整")
+                .accessibilityValue(store.agentSettings?.thinkingChoice.label ?? "未取得")
+                .popover(isPresented: $thinkingPresented, arrowEdge: .bottom) {
+                    ThinkingSlider(store: store, compact: true)
+                        .padding(20).frame(width: 320)
+                        .presentationCompactAdaptation(.popover)
+                }
+                Button {
+                    withAnimation(reduceMotion ? nil : .spring(response: 0.34, dampingFraction: 0.88)) {
+                        multiline.toggle()
+                    }
+                    // The replacement editor must be mounted before assigning focus.
+                    inputFocused = false
+                    Task { @MainActor in
+                        await Task.yield()
+                        inputFocused = true
+                    }
+                } label: {
+                    Image(systemName: multiline ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                        .touchTarget()
+                }
+                .accessibilityLabel(multiline ? "入力欄を縮める" : "複数行で入力")
+                .accessibilityValue(multiline ? "複数行モード" : "通常モード")
+                Button { store.send(); inputFocused = true } label: {
+                    Image(systemName: "arrow.up.circle.fill").font(.title2).touchTarget()
+                }
+                .disabled(!store.canSend).keyboardShortcut(.return, modifiers: .control)
+                .accessibilityLabel("送信")
+            }.buttonStyle(.plain)
+        }
+        .padding(.horizontal, 12).padding(.vertical, 8)
+    }
+    #endif
+
     @ViewBuilder private var multilineInput: some View {
         #if os(macOS)
         MultilineMessageInput(text: $store.draft, onSend: { store.send() })
@@ -261,6 +438,7 @@ final class MessageTextView: NSTextView {
 // Keep the draft position local while dragging; save only the final choice.
 struct ThinkingSlider: View {
     @ObservedObject var store: ChatStore
+    var compact = false
     @State private var position: Double = 0
     @State private var editing = false
     private static let choices: [ThinkingChoice] = [.off, .automaticSelective, .automatic, .automaticFrequent, .on]
@@ -271,6 +449,35 @@ struct ThinkingSlider: View {
         store.agentSettings?.models.first(where: { $0.id == store.agentSettings?.modelId })?.supportsThinking == true
     }
     var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if compact {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("現在のモデル").font(.caption).foregroundStyle(.secondary)
+                    Text(store.agentSettings.flatMap { settings in
+                        settings.models.first { $0.id == settings.modelId }?.name ?? settings.modelId
+                    } ?? "未取得")
+                    .font(.subheadline.weight(.semibold)).textSelection(.enabled)
+                    .accessibilityIdentifier("thinking-model-name")
+                }
+                Divider()
+                selectionLabel
+            }
+            sliderRow
+        }
+        .onAppear { restorePosition() }
+        .onChange(of: store.agentSettings?.thinkingChoice) { _, _ in if !editing { restorePosition() } }
+        .onChange(of: store.controlBusy) { _, busy in if !busy && !editing { restorePosition() } }
+        .onChange(of: store.connected) { _, connected in
+            if !connected { editing = false; restorePosition() }
+        }
+    }
+    private var selectionLabel: some View {
+        HStack(spacing: 4) {
+            Text("Thinking:")
+            Text(editing ? selected.label : saved.label).foregroundStyle(.secondary)
+        }.font(.caption)
+    }
+    private var sliderRow: some View {
         HStack(spacing: 8) {
             Text("OFF").font(.caption2).foregroundStyle(.secondary)
             Slider(value: Binding(get: { position }, set: { value in
@@ -292,18 +499,9 @@ struct ThinkingSlider: View {
             .accessibilityValue(editing ? selected.label : saved.label)
             .help("左端は常にOFF、中央3段階は自動（控えめ・標準・多め）、右端は常にON。変更は次のターンから適用します。")
             Text("ON").font(.caption2).foregroundStyle(.secondary)
-            HStack(spacing: 4) {
-                Text("Thinking:")
-                Text(editing ? selected.label : saved.label).foregroundStyle(.secondary)
-            }.font(.caption).fixedSize()
+            if !compact { selectionLabel.fixedSize() }
             if store.controlBusy { ProgressView().controlSize(.small) }
             Spacer(minLength: 0)
-        }
-        .onAppear { restorePosition() }
-        .onChange(of: store.agentSettings?.thinkingChoice) { _, _ in if !editing { restorePosition() } }
-        .onChange(of: store.controlBusy) { _, busy in if !busy && !editing { restorePosition() } }
-        .onChange(of: store.connected) { _, connected in
-            if !connected { editing = false; restorePosition() }
         }
     }
     private func restorePosition() {

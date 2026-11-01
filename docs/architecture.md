@@ -160,3 +160,5 @@ The catalog includes `@cf/qwen/qwen3.8-27b` with `supportsThinking=true`. `model
 `web_fetch_async`はAgentのSQLite outboxからCloudflare Queuesへ投入し、既存Agent Workerのconsumerがtools-miscを呼びます。結果は内部RPCでAgentへ永続化してからackし、通常ターンと共通の実行ゲートが空いたところでツールなし・Thinking OFFの要約を生成します。通知本文とジョブ完了は同一トランザクションで保存し、`message_added`で配信します。SDKの永続スケジュールが投入失敗・lease切れ・通知失敗を回復し、epochで履歴削除後の結果を除外します。詳細は[非同期Web Fetch](async-fetch.md)。
 
 `web_fetch`はtools-miscのRPCとして公開します。AgentはURLだけを送り、Tools Workerが公開URL/DNSの検証、手動redirect、本文のストリーム上限、Readability / LinkeDOM / Turndownによる抽出と出力制限を担当します。DOMを再パースせず、抽出結果を参照データとしてLLMへ返します。認証情報を外部へ渡さず、ツールWorkerにも追加の秘密やstorage bindingを持たせません。DNSの事前検査にはIP固定の保証がないため、その限界とCPUのローカル計測を[Web Fetch](web-fetch.md)に明記しています。Browser Runは追加していません。
+
+`set_reminder`は分数と通知内容を受け取り、AgentのSQLiteに保存してSDKの永続スケジュールで通知します。期限とその1分後に起動を予約し、返信中は完了を待って配信します。履歴保存と通知済み状態の更新は同一トランザクションで行い、`message_added`で配信します。履歴削除時には未通知のリマインダーも削除します。1〜43200分、未通知20件まで。通知は履歴に残り、OSプッシュは行いません。実際の配信は実行状況によって遅れる場合があります。

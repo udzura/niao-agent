@@ -283,3 +283,29 @@ it("enforces URL/schema limits and aborts before accepting jobs",async()=>{
   const abort=new AbortController();abort.abort();await expect(tool.execute({url},abort.signal)).rejects.toThrow();
   expect(enqueue).not.toHaveBeenCalled();
 });
+
+
+it("exposes authenticated, revisioned job snapshots through HTTP and WebSocket",async()=>{
+  expect((await SELF.fetch(`${base}/jobs`)).status).toBe(401);
+  expect((await SELF.fetch(`${base}/jobs`,{method:"POST",headers})).status).toBe(405);
+  await setup();const client=await start();const body=await payload();
+  const getJobs=async()=> (await (await SELF.fetch(`${base}/jobs`,{headers})).json<any>()).jobs;
+  const queued=await getJobs();
+  expect(queued.items).toEqual([{id:body.jobId,kind:"web_fetch",title:"articles.example.org",status:"queued"}]);
+  expect((await history()).jobs).toEqual(queued);
+  expect(client.events.find(e=>e.type==="ready").jobs.items).toEqual([]);
+  expect(client.events.some(e=>e.type==="jobs_updated" && e.jobs.items[0]?.status==="queued")).toBe(true);
+  const claim=await runInDurableObject(await stub(),(a:any)=>a.claimFetchJob(body));
+  const running=await getJobs();expect(running.revision).toBeGreaterThan(queued.revision);
+  expect(running.items[0].status).toBe("running");
+  await runInDurableObject(await stub(),async(a:any)=>{
+    a.active={requestId:"other-turn",text:""};
+    await a.completeFetchJob(body,claim.token,{ok:false,error:"web_fetch_timeout"});
+  });
+  expect((await getJobs()).items[0].status).toBe("ready");
+  await runInDurableObject(await stub(),async(a:any)=>{a.active=null;await a.deliverFetchNotifications();});
+  await until(()=>client.events.some(e=>e.type==="jobs_updated" && e.jobs.revision>running.revision && e.jobs.items.length===0));
+  expect((await getJobs()).items).toEqual([]);
+  const revisions=client.events.filter(e=>e.type==="jobs_updated").map(e=>e.jobs.revision);
+  expect(revisions.every((r,i)=>i===0 || r>revisions[i-1])).toBe(true);
+});

@@ -34,7 +34,41 @@ struct PartialMessage: Codable {
     let text: String
     var thinking: [ThinkingSegment]? = nil
 }
+struct BackgroundJob: Codable, Identifiable, Equatable {
+    let id: String
+    let kind: String
+    let title: String
+    let status: String
+    let dueAt: String?
+    var scheduledDate: Date? {
+        guard let dueAt else { return nil }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.date(from: dueAt) ?? ISO8601DateFormatter().date(from: dueAt)
+    }
+    var label: String { kind == "reminder" ? "リマインダー" : kind == "web_fetch" ? "記事の取得" : "バックグラウンド処理" }
+    var icon: String { kind == "reminder" ? "bell" : "doc.text.magnifyingglass" }
+    var statusLabel: String {
+        switch status {
+        case "pending": "受付済み"
+        case "queued": "実行待ち"
+        case "running": "取得中"
+        case "ready": "通知待ち"
+        case "notifying": "要約を生成中"
+        case "retry_wait": "通知の再試行待ち"
+        case "scheduled": "予約済み"
+        default: "処理中"
+        }
+    }
+}
+struct BackgroundJobsSnapshot: Codable, Equatable {
+    let revision: Int
+    let items: [BackgroundJob]
+    // HTTP replies and buffered socket events may arrive in reverse order.
+    func accepting(_ incoming: Self) -> Self { incoming.revision >= revision ? incoming : self }
+}
 struct HistoryPage: Decodable {
+    var jobs: BackgroundJobsSnapshot? = nil
     let epoch: Int?
     let settings: AgentSettings?
     let v: Int
@@ -45,6 +79,7 @@ struct HistoryPage: Decodable {
     let active: PartialMessage?
 }
 struct ServerEvent: Decodable {
+    var jobs: BackgroundJobsSnapshot? = nil
     let thinking: [ThinkingSegment]?
     let name: String?
     let status: String?
