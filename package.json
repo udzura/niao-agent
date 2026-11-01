@@ -8,6 +8,7 @@
     "apps/tools-misc"
   ],
   "scripts": {
+    "version:set": "node tools/set-version.mjs",
     "dev": "npm run dev -w apps/worker",
     "test": "npm run test -w apps/past-logs && npm run test -w apps/worker",
     "test:macos": "swift test --package-path apps/macos",

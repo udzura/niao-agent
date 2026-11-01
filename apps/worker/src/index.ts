@@ -1,3 +1,4 @@
+import {version} from "../../../version.json";
 import { routeAgentRequest } from "agents";
 import { authenticated } from "./auth";
 import type {NiaoAgent} from "./niao-agent";
@@ -22,7 +23,7 @@ export default {
     if (!env.NIAO_TOKEN || env.NIAO_TOKEN.length < 32) return new Response("Server is not configured", {status: 503});
     if (!await authenticated(request, env.NIAO_TOKEN)) return new Response("Unauthorized", {status: 401, headers: {"WWW-Authenticate": "Bearer"}});
     const url = new URL(request.url);
-    if (url.pathname === "/health" && request.method === "GET") return Response.json({ok: true, protocol: 1}, {headers: {"Cache-Control": "no-store"}});
+    if (url.pathname === "/health" && request.method === "GET") return Response.json({ok: true, protocol: 1, version}, {headers: {"Cache-Control": "no-store"}});
     // One identity only; arbitrary URLs must not create additional billable agents.
     if (!["/agents/niao-agent/personal", "/agents/niao-agent/personal/history", "/agents/niao-agent/personal/usage", "/agents/niao-agent/personal/platform-usage", "/agents/niao-agent/personal/settings", "/agents/niao-agent/personal/jobs"].includes(url.pathname)) return new Response("Not found", {status: 404});
     const allowed = url.pathname.endsWith("/settings") ? ["GET", "PUT"]

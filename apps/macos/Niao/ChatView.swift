@@ -540,6 +540,13 @@ struct SettingsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 Text("Niao の設定").font(.title2.bold())
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("アプリ: \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "不明")")
+                    Text("サーバー: \(store.agentSettings?.serverVersion ?? "未取得（旧サーバーは非対応）")")
+                    if !store.connected && store.agentSettings?.serverVersion != nil {
+                        Text("サーバーは前回接続時のバージョンです。")
+                    }
+                }.font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                 VStack(alignment: .leading, spacing: 12) {
                     Text("接続先").font(.caption).foregroundStyle(.secondary)
                     TextField("バックエンド URL", text: $url)

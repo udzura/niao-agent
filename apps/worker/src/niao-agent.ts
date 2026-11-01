@@ -1,3 +1,4 @@
+import {version} from "../../../version.json";
 import { rubyExecutor } from "./ruby/tool";
 import { Agent, type Connection, type ConnectionContext, type WSMessage } from "agents";
 import type { Env } from "./index";
@@ -203,7 +204,7 @@ export class NiaoAgent extends Agent<Env> {
     const row = this.sql<{modelId:ModelID;epoch:number;thinkingMode:ThinkingMode;thinkingPolicy:string}>`SELECT modelId, epoch, thinkingMode, thinkingPolicy FROM niao_settings WHERE id = 1`[0];
     return {...row,thinkingPolicy:thinkingPolicy(JSON.parse(row.thinkingPolicy))};
   }
-  private settingsResponse() { const settings = this.settings(); return {v:1,...settings,thinkingEnabled:settings.thinkingMode === "on",models:MODELS}; }
+  private settingsResponse() { const settings = this.settings(); return {v:1,...settings,serverVersion:version,thinkingEnabled:settings.thinkingMode === "on",models:MODELS}; }
   private json(data: object, status = 200) { return Response.json(data, {status, headers: {"Cache-Control": "no-store"}}); }
   protected createModel(modelId: ModelID, thinkingEnabled: boolean, tools: AdditionalTool[] = []): ChatModel {
     return new WorkersAIModel(this.env.AI, modelId, rubyExecutor(this.env.RUBY_RUNNER), thinkingEnabled, [...miscTools(this.env.TOOLS_MISC), ...tools]);

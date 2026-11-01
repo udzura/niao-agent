@@ -5,10 +5,12 @@ final class ThinkingTests: XCTestCase {
     func testModelSettingsRestoreThinkingAndAcceptOlderServers() throws {
         let old = #"{"v":1,"epoch":2,"modelId":"gemma","models":[{"id":"gemma","name":"Gemma"}]}"#
         let legacy = try JSONDecoder().decode(AgentSettings.self, from: Data(old.utf8))
+        XCTAssertNil(legacy.serverVersion)
         XCTAssertFalse(legacy.thinkingEnabled)
         XCTAssertNil(legacy.models[0].supportsThinking)
-        let current = #"{"v":1,"epoch":2,"modelId":"gemma","thinkingEnabled":true,"models":[{"id":"gemma","name":"Gemma","supportsThinking":true},{"id":"glm","name":"GLM","supportsThinking":false}]}"#
+        let current = #"{"v":1,"epoch":2,"modelId":"gemma","thinkingEnabled":true,"serverVersion":"0.1.20261101","models":[{"id":"gemma","name":"Gemma","supportsThinking":true},{"id":"glm","name":"GLM","supportsThinking":false}]}"#
         let settings = try JSONDecoder().decode(AgentSettings.self, from: Data(current.utf8))
+        XCTAssertEqual(settings.serverVersion, "0.1.20261101")
         XCTAssertTrue(settings.thinkingEnabled)
         XCTAssertEqual(settings.models.map(\.supportsThinking), [true,false])
         let event = try JSONDecoder().decode(ServerEvent.self, from: Data("{\"v\":1,\"type\":\"settings_updated\",\"settings\":\(current)}".utf8))

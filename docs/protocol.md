@@ -137,3 +137,12 @@ history epoch and ignore lower revisions, including buffered WebSocket events
 received after a newer HTTP snapshot. The existing history sync restores the list
 after reconnect without adding another polling loop. Older servers may omit
 `jobs`; clients then hide the indicator. No external D1 migration is needed.
+
+### Release version
+
+Authenticated `GET /health` adds `version` (e.g. `0.1.20261101`). Settings
+responses, including settings embedded in history and WebSocket updates, add
+`serverVersion`. These strings identify the deployed Agent release, independent
+of protocol `v:1`. Older clients ignore the fields; new clients accept their
+absence from older servers. The client displays its own bundle marketing version
+separately so mixed client/server releases remain visible.

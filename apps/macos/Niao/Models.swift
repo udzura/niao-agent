@@ -312,6 +312,7 @@ enum ThinkingChoice: String, CaseIterable, Identifiable {
     }
 }
 struct AgentSettings: Decodable {
+    let serverVersion: String?
     struct Model: Decodable, Identifiable {
         let id: String
         let name: String
@@ -325,9 +326,10 @@ struct AgentSettings: Decodable {
     var thinkingEnabled: Bool { thinkingMode == .on }
     let epoch: Int
     let models: [Model]
-    private enum CodingKeys: String, CodingKey { case v, modelId, thinkingMode, thinkingPolicy, thinkingEnabled, epoch, models }
+    private enum CodingKeys: String, CodingKey { case v, modelId, thinkingMode, thinkingPolicy, thinkingEnabled, epoch, models, serverVersion }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
+        serverVersion = try values.decodeIfPresent(String.self, forKey: .serverVersion)
         v = try values.decode(Int.self, forKey: .v)
         modelId = try values.decode(String.self, forKey: .modelId)
         if let mode = try values.decodeIfPresent(ThinkingMode.self, forKey: .thinkingMode) { thinkingMode = mode }

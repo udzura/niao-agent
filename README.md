@@ -249,3 +249,17 @@ bash apps/macos/scripts/smoke.sh <previous-request-id>
 詳しい実行結果・未確認項目は [検証記録](docs/verification.md)、設計は [architecture.md](docs/architecture.md)、通信仕様は [protocol.md](docs/protocol.md) を参照してください。
 
 Cosenseの定期同期・Queue・初回同期の設定は [自動同期](docs/cosense-sync.md) を参照してください。
+
+## バージョン管理
+
+リリースバージョンは`0.1.20261101`のような`MAJOR.MINOR.YYYYMMDD`形式です。`version.json`を共通の元データとし、更新には次を使います。
+
+```sh
+npm run version:set -- 0.1.20261102
+```
+
+AgentのAPIは`version.json`を直接参照し、コマンドはmacOS / iOSのDebug・Release両方の`MARKETING_VERSION`も更新します。引数を省略すると現在の`version.json`へアプリ設定を再同期します。日付はリリース日であり、起動やビルドのたびには変わりません。
+
+アプリの設定画面にアプリ自身と接続先サーバーのバージョンを表示します。切断中のサーバー値は前回取得値と表示し、旧サーバーが値を返さない場合も接続できます。認証付き`GET /health`の`version`、モデル設定APIの`serverVersion`からも取得できます。通信プロトコル番号`v:1` / `protocol:1`はリリースバージョンと独立しています。
+
+反映にはAgentの再デプロイとアプリの再ビルドが必要です。`CFBundleVersion`（Xcodeの`CURRENT_PROJECT_VERSION`）は配布用のビルド番号として独立して保持します。同じリリースを再配布するときは必要に応じてビルド番号も増やしてください。

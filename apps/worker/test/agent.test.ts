@@ -1,3 +1,4 @@
+import {version} from "../../../version.json";
 import { SELF, env, runInDurableObject, reset, evictDurableObject } from "cloudflare:test";
 import { getAgentByName } from "agents";
 import { afterEach, describe, expect, it } from "vitest";
@@ -78,7 +79,7 @@ describe("authenticated Worker boundary", () => {
       expect((await SELF.fetch(`https://test${path}`)).status).toBe(401);
       expect((await SELF.fetch(`https://test${path}`, {headers: {Upgrade: "websocket"}})).status).toBe(401);
     }
-    expect((await SELF.fetch("https://test/health", {headers})).status).toBe(200);
+    expect(await (await SELF.fetch("https://test/health", {headers})).json()).toEqual({ok:true,protocol:1,version});
     expect((await SELF.fetch("https://test/health?token=anything")).status).toBe(401);
     expect((await SELF.fetch("https://test/agents/niao-agent/other", {headers})).status).toBe(404);
     expect((await SELF.fetch(base, {method: "POST", headers})).status).toBe(405);
@@ -277,6 +278,7 @@ describe("model settings and conversation cleanup", () => {
     expect((await SELF.fetch(`${base}/settings`, {method: "PUT", headers: {...headers, "Content-Type": "application/json"}, body: "null"})).status).toBe(400);
     expect((await SELF.fetch(`${base}/history`, {method: "DELETE", headers})).status).toBe(428);
     const settings = await (await SELF.fetch(`${base}/settings`, {headers})).json<any>();
+    expect(settings.serverVersion).toBe(version);
     expect(settings.modelId).toBe(gemma); expect(settings.models.map((x: any) => x.id)).toEqual([gemma, glm, "@cf/ibm-granite/granite-4.0-h-micro", "@cf/meta/llama-3.3-70b-instruct-fp8-fast", "@cf/meta/llama-4-scout-17b-16e-instruct", "@cf/qwen/qwen3-30b-a3b-fp8", "@cf/qwen/qwen3.8-27b"]);
   });
   it.each([glm,"@cf/meta/llama-3.3-70b-instruct-fp8-fast","@cf/ibm-granite/granite-4.0-h-micro", "@cf/meta/llama-4-scout-17b-16e-instruct", "@cf/qwen/qwen3-30b-a3b-fp8"])("persists %s across eviction and uses it for inference", async selected => {
