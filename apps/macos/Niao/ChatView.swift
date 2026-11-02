@@ -77,14 +77,30 @@ struct ChatView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 20) {
                         if store.messages.isEmpty && !store.busy {
-                            ContentUnavailableView("Niao", systemImage: "bird", description: Text("設定でバックエンドに接続して、会話を始めましょう。"))
-                                .frame(maxWidth: .infinity).padding(.top, 60)
+                            if store.historyLoading {
+                                VStack(spacing: 12) {
+                                    ProgressView("メッセージを読み込んでいます…")
+                                    Text(store.connection).font(.caption).foregroundStyle(.secondary)
+                                }.frame(maxWidth: .infinity).padding(.top, 60)
+                                    .accessibilityIdentifier("history-loading")
+                            } else if let failure = store.historyError {
+                                ContentUnavailableView {
+                                    Label("会話を読み込めませんでした", systemImage: "exclamationmark.bubble")
+                                } description: {
+                                    Text(failure)
+                                } actions: {
+                                    Button("再読み込み") { store.retryHistory() }
+                                }.accessibilityIdentifier("history-load-error")
+                            } else {
+                                ContentUnavailableView("Niao", systemImage: "bird", description: Text("設定でバックエンドに接続して、会話を始めましょう。"))
+                                    .frame(maxWidth: .infinity).padding(.top, 60)
+                            }
                         }
                         if store.hasOlderMessages {
                             Button("以前のメッセージを読み込む") { store.loadOlderMessages() }
                                 .disabled(store.historyLoading)
                         }
-                        if store.historyLoading { ProgressView().controlSize(.small) }
+                        if store.historyLoading && !store.messages.isEmpty { ProgressView("メッセージを読み込んでいます…").controlSize(.small).font(.caption) }
                         if store.selectedSessionID == nil && store.connected {
                             Button("新しい会話") { store.createSession() }.disabled(store.controlBusy)
                         }
@@ -112,6 +128,7 @@ struct ChatView: View {
                         Color.clear.frame(height: 1).id("bottom")
                     }.padding(20)
                 }
+                .accessibilityIdentifier("message-history")
                 .onChange(of: store.messages) { previous, current in
                     if let oldFirst = previous.first, let newFirst = current.first,
                        newFirst.seq < oldFirst.seq, current.contains(where: { $0.id == oldFirst.id }) {
@@ -142,7 +159,7 @@ struct ChatView: View {
                     Button("破棄") { store.discardOutbox() }
                 }.padding(12).background(.quaternary)
             }
-            if let error = store.error {
+            if let error = store.error, !store.messages.isEmpty || error != store.historyError {
                 HStack(alignment: .top) {
                     Image(systemName: "exclamationmark.triangle")
                     Text(error).font(.caption).textSelection(.enabled)
@@ -287,7 +304,8 @@ struct ChatView: View {
                                         Text(due, format: .dateTime.month().day().hour().minute())
                                             .font(.caption).foregroundStyle(.secondary)
                                         if due <= Date() {
-                                            Text("会話の区切りで通知します").font(.caption).foregroundStyle(.secondary)
+                                            Text("待機中なら自動で通知します。応答中は完了を待ちます。")
+                                                .font(.caption).foregroundStyle(.secondary)
                                         }
                                     }
                                 }.frame(maxWidth: .infinity, alignment: .leading)

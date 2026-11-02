@@ -17,6 +17,9 @@ import {validateWebUrl} from "../../tools-misc/src/web-resource";
 
 type Active = { sessionId: string; requestId: string; text: string; thinking?: ThinkingSegment[] };
 const log = (event: string, fields: Record<string, unknown> = {}) => console.log(JSON.stringify({event, ...fields}));
+// Agents 0.31 stores Date schedules as floor(milliseconds / 1000). Never arm
+// a deadline check before its persisted millisecond-precision due time.
+const reminderWake = (dueAt:number) => new Date(Math.ceil(dueAt/1000)*1000);
 
 export class NiaoAgent extends Agent<Env> {
   static options = { sendIdentityOnConnect: false };
@@ -92,6 +95,7 @@ export class NiaoAgent extends Agent<Env> {
     this.migrateSessions();
     await this.scheduleEvery(3600,"expireSessions");
     await this.expireSessions();
+    this.deliverReminders();
     log("agent.started");
   }
 
@@ -245,9 +249,9 @@ export class NiaoAgent extends Agent<Env> {
     if (this.sql<{n:number}>`SELECT COUNT(*) AS n FROM niao_reminders WHERE status='pending'`[0].n >= 20) return {ok:false,error:"reminder_limit"};
     const jobId=crypto.randomUUID(), dueAt=Date.now()+minutes*60_000;
     // Recovery is registered first, so every saved job has a durable wakeup.
-    const recovery=await this.schedule(new Date(dueAt+60_000),"maintainReminder",{jobId});
+    const recovery=await this.schedule(reminderWake(dueAt+60_000),"maintainReminder",{jobId});
     try {
-      await this.schedule(new Date(dueAt),"maintainReminder",{jobId});
+      await this.schedule(reminderWake(dueAt),"maintainReminder",{jobId});
       if (this.session(sessionId)?.epoch !== epoch || this.active?.requestId !== requestId) {
         await this.cancelSchedule(recovery.id); return {ok:false,error:"history_changed"};
       }
@@ -264,9 +268,16 @@ export class NiaoAgent extends Agent<Env> {
 
   async maintainReminder(payload:{jobId:string},schedule?:{id:string}) {
     const job=this.sql<{epoch:number;dueAt:number;status:string;sessionId:string}>`SELECT epoch,dueAt,status,sessionId FROM niao_reminders WHERE id=${payload.jobId}`[0];
-    if (job && job.epoch === this.session(job.sessionId)?.epoch && job.status === 'pending' && job.dueAt <= Date.now()) {
-      if (this.active) await this.schedule(new Date(Date.now()+60_000),"maintainReminder",payload);
-      else this.deliverReminders();
+    if (job && job.epoch === this.session(job.sessionId)?.epoch && job.status === 'pending') {
+      if (job.dueAt > Date.now()) {
+        // Repair older schedules too: returning here used to consume an early
+        // wake and leave the reminder waiting for recovery or another turn.
+        await this.schedule(reminderWake(job.dueAt),"maintainReminder",payload);
+        log("reminder.deferred",{jobId:payload.jobId,reason:"early_wake"});
+      } else if (this.active) {
+        await this.schedule(reminderWake(Date.now()+60_000),"maintainReminder",payload);
+        log("reminder.deferred",{jobId:payload.jobId,reason:"generating"});
+      } else this.deliverReminders();
     }
     const remaining=this.sql<{status:string}>`SELECT status FROM niao_reminders WHERE id=${payload.jobId}`[0];
     if ((!remaining || remaining.status !== 'pending') && schedule) await this.cancelSchedule(schedule.id);
@@ -274,7 +285,7 @@ export class NiaoAgent extends Agent<Env> {
 
   private deliverReminders() {
     if (this.active) return;
-    const jobs=this.sql<{id:string;message:string;sessionId:string}>`SELECT id,message,sessionId FROM niao_reminders WHERE status='pending' AND dueAt <= ${Date.now()} ORDER BY dueAt,id`;
+    const jobs=this.sql<{id:string;message:string;sessionId:string;dueAt:number}>`SELECT id,message,sessionId,dueAt FROM niao_reminders WHERE status='pending' AND dueAt <= ${Date.now()} ORDER BY dueAt,id`;
     for (const job of jobs) {
       const requestId=`reminder:${job.id}`, text=`リマインダー: ${job.message}`;
       const message=this.ctx.storage.transactionSync(()=>{
@@ -285,6 +296,7 @@ export class NiaoAgent extends Agent<Env> {
       });
       this.touchSession(job.sessionId);
       this.publish({type:"message_added",sessionId:job.sessionId,requestId,message});
+      log("reminder.notified",{jobId:job.id,delayMs:Math.max(0,Date.now()-job.dueAt)});
     }
     if (jobs.length) this.publishJobs();
   }

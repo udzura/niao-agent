@@ -49,7 +49,7 @@ final class NiaoUITests: XCTestCase {
         capture("iPhone-compact-keyboard")
         // Even an empty history is a keyboard-dismiss target. Input taps must
         // keep focus, while history taps dismiss it in both editing modes.
-        app.staticTexts["Niao"].tap()
+        app.scrollViews["message-history"].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.05)).tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5))
         XCTAssertEqual(input.value as? String, "draft")
         app.buttons["Thinkingを調整"].tap()
@@ -66,7 +66,7 @@ final class NiaoUITests: XCTestCase {
         editor.typeText("first line\nsecond line")
         XCTAssertEqual(editor.value as? String, "first line\nsecond line")
         capture("iPhone-multiline-keyboard")
-        app.staticTexts["Niao"].tap()
+        app.scrollViews["message-history"].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.05)).tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5))
         XCTAssertEqual(editor.value as? String, "first line\nsecond line")
         app.buttons["入力欄を縮める"].tap()

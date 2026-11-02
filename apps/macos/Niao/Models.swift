@@ -385,3 +385,23 @@ struct ModelSettingsUpdate: Encodable {
     var thinkingPolicy: ThinkingPolicy? = nil
 }
 struct ClearHistoryResult: Decodable { let v: Int; let epoch: Int }
+
+struct HistoryLoadState: Equatable {
+    enum Phase: Equatable { case idle, loading, loaded, failed(String) }
+    private(set) var phase: Phase = .idle
+    private var request: UUID?
+    var isLoading: Bool { phase == .loading }
+    var error: String? { if case .failed(let message) = phase { message } else { nil } }
+    mutating func begin() -> UUID {
+        let id = UUID(); request = id; phase = .loading; return id
+    }
+    mutating func finish(_ id: UUID) {
+        guard request == id else { return }
+        request = nil; phase = .loaded
+    }
+    mutating func fail(_ id: UUID, message: String) {
+        guard request == id else { return }
+        request = nil; phase = .failed(message)
+    }
+    mutating func reset() { request = nil; phase = .idle }
+}

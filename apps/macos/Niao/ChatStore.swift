@@ -34,7 +34,9 @@ final class ChatStore: ObservableObject {
     @Published var selectedSessionID: String?
     @Published var unreadSessions: Set<String> = []
     @Published var hasOlderMessages = false
-    @Published var historyLoading = false
+    @Published private(set) var historyLoad = HistoryLoadState()
+    var historyLoading: Bool { historyLoad.isLoading }
+    var historyError: String? { historyLoad.error }
     private var oldestCursor: Int?
     private var selectionRevision = 0
     private var drafts: [String: String] = [:]
@@ -159,16 +161,19 @@ final class ChatStore: ObservableObject {
         socket?.cancel(with: .goingAway, reason: nil); socket = nil
         connected = false
         partial = nil
+        historyLoad.reset()
     }
     func reconnect() {
         authenticationBlocked = false
         disconnect()
+        _ = historyLoad.begin()
         let id = generation
         loop = Task { [weak self] in await self?.run(id: id) }
     }
     private func run(id: UUID) async {
         defer { if generation == id { loop = nil } }
         while !Task.isCancelled && generation == id {
+            let load = historyLoad.begin()
             do {
                 connection = retryAttempt == 0 ? "接続中…" : "再接続中…"
                 let base = try BackendURL.validate(backendURL)
@@ -195,6 +200,7 @@ final class ChatStore: ObservableObject {
                 // Subscribe before the final sync: events during HTTP are queued by URLSession.
                 try await synchronize(backend, id: id)
                 guard generation == id, !Task.isCancelled else { return }
+                historyLoad.finish(load)
                 connected = true; connection = "接続済み"; error = nil; retryAttempt = 0
                 applyPendingNotification()
                 refreshUsage()
@@ -236,6 +242,7 @@ final class ChatStore: ObservableObject {
                 guard generation == id, !Task.isCancelled else { return }
                 connected = false; partial = nil; runningToolName = nil; connection = "未接続"
                 self.error = error.localizedDescription
+                historyLoad.fail(load, message: error.localizedDescription)
                 heartbeat?.cancel(); heartbeat = nil
                 socket?.cancel(with: .goingAway, reason: nil); socket = nil
                 if case NiaoError.unauthorized = error { return }
@@ -469,18 +476,26 @@ final class ChatStore: ObservableObject {
         selectSession(target.sessionID)
     }
     private func loadSelectedHistory() {
-        guard let backend, selectedSessionID != nil else { historyLoading = false; return }
+        guard let backend, selectedSessionID != nil else { historyLoad.reset(); return }
         let id = generation, selection = selectionRevision
-        historyLoading = true
+        let load = historyLoad.begin()
         Task {
-            defer { if generation == id && selectionRevision == selection { historyLoading = false } }
-            do { try await synchronize(backend, id: id) }
+            do {
+                try await synchronize(backend, id: id)
+                guard generation == id, selectionRevision == selection else { return }
+                historyLoad.finish(load); error = nil
+            }
             catch {
                 guard generation == id, selectionRevision == selection else { return }
                 self.error = error.localizedDescription
+                historyLoad.fail(load, message: error.localizedDescription)
                 if case NiaoError.http(404) = error { reconnect() }
             }
         }
+    }
+    func retryHistory() {
+        if connected, backend != nil { loadSelectedHistory() }
+        else { reconnect() }
     }
     func createSession() {
         guard connected, !controlBusy, let backend else { return }
@@ -523,17 +538,22 @@ final class ChatStore: ObservableObject {
     func loadOlderMessages() {
         guard let backend, let session = selectedSessionID, let before = oldestCursor, hasOlderMessages, !historyLoading else { return }
         let id = generation, selection = selectionRevision
-        historyLoading = true
+        let load = historyLoad.begin()
         Task {
-            defer { if generation == id && selectionRevision == selection { historyLoading = false } }
             do {
                 let page = try await backend.history(after: 0, epoch: historyEpoch, sessionID: session, before: before)
                 guard generation == id, selectionRevision == selection, selectedSessionID == page.sessionId else { return }
-                guard acceptEpoch(page.epoch ?? 0) else { return }
+                guard acceptEpoch(page.epoch ?? 0) else { historyLoad.finish(load); return }
                 messages = mergeMessages(messages, page.messages)
                 oldestCursor = page.beforeCursor
                 hasOlderMessages = page.hasOlder == true
-            } catch { if generation == id && selectionRevision == selection { self.error = error.localizedDescription } }
+                historyLoad.finish(load); error = nil
+            } catch {
+                if generation == id && selectionRevision == selection {
+                    self.error = error.localizedDescription
+                    historyLoad.fail(load, message: error.localizedDescription)
+                }
+            }
         }
     }
 
