@@ -31,7 +31,7 @@ iOSアプリのBundle Identifierは`jp.udzura.niao.Niao`です。以前の`dev.n
 2. 既存の本番AgentのHTTPS URLと、そのAgentの`NIAO_TOKEN`を入力。
 3. 「保存して接続」でFace IDまたは端末パスコードによる本人確認後に接続。
 
-この移植だけではWorkerの変更・再デプロイは不要です。同じ接続先の`personal` Agentを使うので、MacとiPhoneは同じ会話履歴・モデル・Thinking設定を共有します。新しいトークンをサーバーで作る必要はありません。Keychain・接続先URL・端末内のツール統計・送信待ちメッセージは各端末で独立しており、Macから自動移行しません。
+複数会話対応にはv2対応の`niao-agent`を先にデプロイしてください。同じ接続先の`personal` Agentを使うので、MacとiPhoneは会話一覧・履歴・モデル・Thinking設定を共有します。表示中の会話は端末ごとに選べます。右上の吹き出しから一覧・作成・名前変更・アーカイブ・削除を操作します。[保持期限・移行](sessions.md)も確認してください。新しいトークンをサーバーで作る必要はありません。Keychain・接続先URL・端末内のツール統計・送信待ちメッセージは各端末で独立しており、Macから自動移行しません。
 
 ローカル開発は、Macで`npm run dev`を起動し、**iOSシミュレータ**から`http://127.0.0.1:8787`と`.dev.vars`の`NIAO_TOKEN`を指定できます。実機の`127.0.0.1`はiPhone自身です。URL検証は引き続きHTTPS必須（HTTPはloopbackのみ）なので、実機ではデプロイ済みHTTPSバックエンドを使ってください。
 

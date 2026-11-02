@@ -6,6 +6,7 @@
   "compatibility_flags": [
     "nodejs_compat"
   ],
+  "vars": {"CHAT_RETENTION_DAYS":"30"},
   "services": [
     {
       "binding": "RUBY_RUNNER",

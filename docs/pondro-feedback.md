@@ -54,3 +54,9 @@ Later phases can add discovery, scheduling, memory, or tools without moving thes
 
 23. Moving a job to a Queue changes when it runs, not where HTML parsing consumes CPU. Keep the synchronous fetch and browser-backed conversion behind separate RPC methods while preserving the Agent's job/result/notification contract. A Browser Run binding avoids distributing API tokens. Pass validated, bounded HTML rather than an unchecked browser URL when retaining existing redirect/DNS policy matters. Browser rendering does not remove Worker CPU limits, source/output bounds, or browser quotas.
 24. Verify provider options at the actual lifecycle boundary: a live Browser Run HTML probe executed an inline script despite the JavaScript-disable option. Strip active elements using native streaming HTMLRewriter and prepend CSP before passing HTML to the remote parser; deny browser network requests too. The same probe showed relative Markdown links were not resolved by a base element alone, so resolve them before conversion. Keep deterministic fixture tests separate from an explicit real-service smoke test.
+
+## 会話の保持とAgentの寿命 (2026-11-02)
+
+Agentの識別子と会話の識別子を分ける。1人のAgentが複数会話を所有すると、設定・利用量・推論の排他・非同期処理の窓口を共有できる。会話ごとにDOを増やすことを必須にしない。
+
+会話一覧、最終活動、保持期限、明示削除、遅延完了の無効化はアプリの責務で、SDKの永続SQLite・scheduler・hibernating WebSocketを基盤として使う。保存したメッセージと活動日時は同じトランザクションで更新する。1本の通信に複数会話を載せる場合、会話ID・epoch・cursorを独立して扱い、古いクライアントへ他会話を配信しない。削除は外部処理の停止と同義ではないため、完了時に保存先の存在とleaseを再検証する。

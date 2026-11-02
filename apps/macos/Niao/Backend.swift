@@ -33,13 +33,13 @@ final class Backend {
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         return request
     }
-    func history(after: Int, epoch: Int? = nil) async throws -> HistoryPage {
-        let (data, response) = try await session.data(for: request(path: "/agents/niao-agent/personal/history?after=\(after)&epoch=\(epoch ?? 0)"))
+    func history(after: Int, epoch: Int? = nil, sessionID: String = "legacy", latest: Bool = false, before: Int? = nil) async throws -> HistoryPage {
+        let (data, response) = try await session.data(for: request(path: "/agents/niao-agent/personal/sessions/\(sessionID)/history?after=\(after)&epoch=\(epoch ?? 0)&latest=\(latest ? 1 : 0)" + (before.map { "&before=\($0)" } ?? "")))
         guard let http = response as? HTTPURLResponse else { throw NiaoError.protocolMismatch }
         if http.statusCode == 401 { throw NiaoError.unauthorized }
         guard http.statusCode == 200 else { throw NiaoError.http(http.statusCode) }
         let page = try JSONDecoder().decode(HistoryPage.self, from: data)
-        guard page.v == 1 else { throw NiaoError.protocolMismatch }
+        guard page.v == 2, page.sessionId == sessionID else { throw NiaoError.protocolMismatch }
         return page
     }
     private struct Failure: Decodable { let code: String }
@@ -52,7 +52,7 @@ final class Backend {
         let (data, response) = try await session.data(for: req)
         guard let http = response as? HTTPURLResponse else { throw NiaoError.protocolMismatch }
         if http.statusCode == 401 { throw NiaoError.unauthorized }
-        guard http.statusCode == 200 else {
+        guard (200...299).contains(http.statusCode) else {
             if let failure = try? JSONDecoder().decode(Failure.self, from: data) { throw NiaoError.api(failure.code) }
             throw NiaoError.http(http.statusCode)
         }
@@ -62,8 +62,26 @@ final class Backend {
         let body = try JSONEncoder().encode(update)
         return try await controlRequest(path: "/agents/niao-agent/personal/settings", method: "PUT", body: body)
     }
-    func clearHistory(epoch: Int) async throws -> ClearHistoryResult {
-        try await controlRequest(path: "/agents/niao-agent/personal/history", method: "DELETE", epoch: epoch)
+    func clearHistory(epoch: Int, sessionID: String = "legacy") async throws -> ClearHistoryResult {
+        try await controlRequest(path: "/agents/niao-agent/personal/sessions/\(sessionID)/history", method: "DELETE", epoch: epoch)
+    }
+    func sessions() async throws -> SessionsResponse {
+        let response: SessionsResponse = try await controlRequest(path: "/agents/niao-agent/personal/sessions", method: "GET")
+        guard response.v == 2 else { throw NiaoError.protocolMismatch }
+        return response
+    }
+    func createSession() async throws -> SessionsResponse {
+        try await controlRequest(path: "/agents/niao-agent/personal/sessions", method: "POST", body: Data("{}".utf8))
+    }
+    func editSession(_ id: String, title: String? = nil, archived: Bool? = nil) async throws -> SessionsResponse {
+        var values: [String: Any] = [:]
+        if let title { values["title"] = title }
+        if let archived { values["archived"] = archived }
+        return try await controlRequest(path: "/agents/niao-agent/personal/sessions/\(id)", method: "PATCH", body: JSONSerialization.data(withJSONObject: values))
+    }
+    private struct Deleted: Decodable { let v: Int }
+    func deleteSession(_ session: ChatSession) async throws {
+        let _: Deleted = try await controlRequest(path: "/agents/niao-agent/personal/sessions/\(session.id)", method: "DELETE", epoch: session.epoch)
     }
     func usage() async throws -> UsageSnapshot {
         let (data, response) = try await session.data(for: request(path: "/agents/niao-agent/personal/usage"))
@@ -80,7 +98,7 @@ final class Backend {
         return snapshot
     }
     func socket() -> URLSessionWebSocketTask {
-        let task = session.webSocketTask(with: request(path: "/agents/niao-agent/personal", websocket: true))
+        let task = session.webSocketTask(with: request(path: "/agents/niao-agent/personal?protocol=2", websocket: true))
         task.maximumMessageSize = 1_000_000
         task.resume()
         return task

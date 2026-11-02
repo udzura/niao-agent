@@ -15,6 +15,13 @@ final class NiaoUITests: XCTestCase {
                        "Simulator must be signed so Keychain access is available")
         capture("iPhone-chat")
 
+        app.buttons["会話一覧"].tap()
+        XCTAssertTrue(app.navigationBars["会話"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["最終活動から30日で自動削除"].exists)
+        XCTAssertTrue(app.switches["アーカイブを表示"].exists)
+        capture("iPhone-sessions")
+        app.buttons["完了"].tap()
+
         menu.tap()
         XCTAssertTrue(settings.waitForExistence(timeout: 5))
         capture("iPhone-chat-menu")

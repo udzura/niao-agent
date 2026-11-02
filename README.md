@@ -4,11 +4,12 @@ macOS / iPhoneで使えるパーソナル AI コンパニオンの Phase 1。Swi
 
 - メインウィンドウ、メニューバーから開く・フォーカス、入力・送信、逐次表示、エラー・再試行
 - サーバーを正とする永続履歴、カーソル同期、送信 ID による重複防止
+- [複数会話の保持](docs/sessions.md): 会話一覧・切り替え・名前変更・アーカイブ・明示削除、最終活動から30日で自動削除
 - HTTP と WebSocket upgrade の Bearer 認証、macOS Keychain 保存
 - 切断時の指数バックオフ、スリープ・復帰、20 秒ごとの履歴照合
 - モデル: Gemma 4（既定）/ GLM 4.7 Flash / Granite 4.0 H Micro / Llama 3.3 70B Fast / Llama 4 Scout 17B-16E / Qwen3 30B A3B FP8 / Qwen 3.8 27B を設定画面・APIから切り替え可能
 - Gemma 4・Qwen3・Qwen 3.8のthinkingは回答と分離し、「思考過程」から開閉できます。再起動後も確認できます
-- チャット履歴の削除（モデル設定・使用量は保持）。ニュース収集、定期実行、長期記憶は含みません
+- 会話単位の削除（共通モデル設定・使用量は保持）。ニュースの自動収集や会話からの長期意味記憶は含みません
 - Web Fetch: 既知URLのHTML記事・テキスト・Markdownを取得し、読みやすい本文へ変換（[制限・安全性・デプロイ](docs/web-fetch.md)）
 - リマインダー: `set_reminder`で1分〜30日後に同じ会話へ通知（アプリを閉じていても履歴に保存。OSプッシュ通知はありません）
 - 非同期Web Fetch: `web_fetch_async`で取得をQueueへ送り、Browser Run `/markdown`で変換後、会話の区切りで要約を追加（[設定・復旧・デプロイ](docs/async-fetch.md)）
@@ -114,7 +115,7 @@ open apps/macos/build/Build/Products/Debug/Niao.app
 3. 「保存して接続」後にメッセージを送信する。通常はEnter、または↑ボタン・Ctrl＋Enterで送信できる。「複数行で入力」を押すと入力欄が広がり、Enterは改行、送信は↑ボタン・Ctrl＋Enterになる。入力済みの文章はモードを切り替えても保持する。従来の⌘Returnでも送信できる。
 4. ウィンドウを閉じてもメニューバーの鳥アイコンから再度開ける。終了はメニューの「Niao を終了」。
 
-トークンは接続先ごとに Keychain に保存されます。URL は UserDefaults、送信確認前のメッセージ 1 件だけは `~/Library/Application Support/Niao/outbox.json`（0600）に保存します。確定した会話履歴はローカル保存せず、起動時にサーバーから再取得します。トークンをログ・URL・UserDefaults に書き込みません。
+トークンは接続先ごとに Keychain に保存されます。URL は UserDefaults、送信確認前のメッセージは会話ごとに `~/Library/Application Support/Niao/outbox.json`（0600）に保存します。確定した会話履歴はローカル保存せず、起動時にサーバーから再取得します。トークンをログ・URL・UserDefaults に書き込みません。
 
 本番 URL は HTTPS が必須です。HTTP は localhost / loopback のローカル開発に限ります。HTTP リダイレクトには追従しません。
 

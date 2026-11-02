@@ -14,10 +14,26 @@ struct ChatView: View {
     #endif
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var multiline = false
-    @State private var confirmClear = false
+    @State private var sessionsPresented = false
+    @State private var showArchived = false
+    @State private var deleteTarget: ChatSession?
+    @State private var renameTarget: ChatSession?
+    @State private var renameText = ""
+    @State private var renaming = false
+    @State private var pendingDeleteTarget: ChatSession?
+    @State private var pendingRename = false
     @State private var jobsPresented = false
     @FocusState private var inputFocused: Bool
     var body: some View {
+        HStack(spacing: 0) {
+            #if os(macOS)
+            sessionList.frame(width: 240)
+            Divider()
+            #endif
+            conversationBody
+        }
+    }
+    private var conversationBody: some View {
         VStack(spacing: 0) {
             #if os(iOS)
             mobileHeader
@@ -26,12 +42,13 @@ struct ChatView: View {
                 Circle().fill(store.connected ? Color.green : Color.secondary).frame(width: 7, height: 7)
                 Text(store.connection).font(.caption).foregroundStyle(.secondary)
                 backgroundJobsButton
+                Text(store.selectedSession?.title ?? "会話を選択").font(.headline).lineLimit(1)
                 Spacer()
                 if !store.connected { Button("再接続") { store.reconnect() } }
                 Button { showStatistics() } label: { Image(systemName: "chart.bar").touchTarget() }
                     .help("利用状況統計").accessibilityLabel("利用状況統計を開く")
-                Button { confirmClear = true } label: { Image(systemName: "trash").touchTarget() }
-                    .disabled(!store.connected || store.busy || store.controlBusy).help("チャット履歴を削除").accessibilityLabel("チャット履歴を削除")
+                Button { deleteTarget = store.selectedSession } label: { Image(systemName: "trash").touchTarget() }
+                    .disabled(!store.connected || store.busy || store.controlBusy).help("会話を削除").accessibilityLabel("会話を削除")
                 Button { store.settingsPresented = true } label: { Image(systemName: "gearshape").touchTarget() }.help("設定").accessibilityLabel("設定")
             }.padding(12)
             UsageView(store: store)
@@ -44,8 +61,16 @@ struct ChatView: View {
                             ContentUnavailableView("Niao", systemImage: "bird", description: Text("設定でバックエンドに接続して、会話を始めましょう。"))
                                 .frame(maxWidth: .infinity).padding(.top, 60)
                         }
+                        if store.hasOlderMessages {
+                            Button("以前のメッセージを読み込む") { store.loadOlderMessages() }
+                                .disabled(store.historyLoading)
+                        }
+                        if store.historyLoading { ProgressView().controlSize(.small) }
+                        if store.selectedSessionID == nil && store.connected {
+                            Button("新しい会話") { store.createSession() }.disabled(store.controlBusy)
+                        }
                         ForEach(store.messages) { message in
-                            MessageRow(message: message)
+                            MessageRow(message: message).id(message.id)
                             if let failed = store.turns.first(where: { $0.requestId == message.requestId && $0.status == "failed" }), message.role == "user" {
                                 HStack {
                                     Text(explanation(failed.errorCode ?? "unknown", details: failed.errorDetails)).font(.caption).foregroundStyle(.secondary)
@@ -68,7 +93,15 @@ struct ChatView: View {
                         Color.clear.frame(height: 1).id("bottom")
                     }.padding(20)
                 }
-                .onChange(of: store.messages.count) { _, _ in proxy.scrollTo("bottom", anchor: .bottom) }
+                .onChange(of: store.messages) { previous, current in
+                    if let oldFirst = previous.first, let newFirst = current.first,
+                       newFirst.seq < oldFirst.seq, current.contains(where: { $0.id == oldFirst.id }) {
+                        // Prepending history should keep the passage being read in view.
+                        proxy.scrollTo(oldFirst.id, anchor: .top)
+                    } else {
+                        proxy.scrollTo("bottom", anchor: .bottom)
+                    }
+                }
                 .onChange(of: store.partial?.text) { _, _ in proxy.scrollTo("bottom", anchor: .bottom) }
                 #if os(iOS)
                 .contentShape(Rectangle())
@@ -78,6 +111,10 @@ struct ChatView: View {
                 #endif
             }
             .overlay(alignment: .bottomTrailing) { ToolCallToastOverlay(store: store) }
+            if store.agentBusy && !store.busy {
+                Text("別の会話で応答を生成中です。完了後に送信できます。")
+                    .font(.caption).foregroundStyle(.secondary).padding(8)
+            }
             if let pending = store.outbox {
                 HStack {
                     Text("送信確認待ち: \(pending.content)").font(.caption).lineLimit(2)
@@ -100,14 +137,36 @@ struct ChatView: View {
         .onChange(of: store.backgroundJobs?.items.isEmpty) { _, empty in
             if empty != false { jobsPresented = false }
         }
-        .alert("チャット履歴を削除しますか？", isPresented: $confirmClear) {
+        .alert("この会話を削除しますか？", isPresented: Binding(get: { deleteTarget != nil }, set: { if !$0 { deleteTarget = nil } }), presenting: deleteTarget) { session in
             Button("キャンセル", role: .cancel) {}
-            Button("履歴を削除", role: .destructive) { store.clearHistory() }
-        } message: {
-            Text("サーバー上の会話履歴と送信待ちメッセージを削除します。元に戻せません。モデル設定と使用量の記録は残ります。")
+            Button("会話を削除", role: .destructive) { store.deleteSession(session) }
+        } message: { session in
+            Text("「\(session.title)」の履歴・Thinking・未送信メッセージ・ジョブ・リマインダーを削除します。元に戻せません。共通設定と利用量統計は残ります。")
+        }
+        .alert("会話の名前", isPresented: $renaming) {
+            TextField("会話名", text: $renameText)
+            Button("キャンセル", role: .cancel) {}
+            Button("保存") { if let session = renameTarget { store.editSession(session, title: renameText) } }
+                .disabled(renameText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || renameText.count > 100)
         }
         .sheet(isPresented: $store.settingsPresented) { SettingsView(store: store) }
         #if os(iOS)
+        .sheet(isPresented: $sessionsPresented, onDismiss: {
+            if let target = pendingDeleteTarget { deleteTarget = target; pendingDeleteTarget = nil }
+            if pendingRename { renaming = true; pendingRename = false }
+        }) {
+            NavigationStack {
+                sessionList.navigationTitle("会話")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarLeading) {
+                            Button { store.createSession(); sessionsPresented = false } label: { Image(systemName: "square.and.pencil") }
+                                .disabled(!store.connected || store.controlBusy).accessibilityLabel("新しい会話")
+                        }
+                        ToolbarItem(placement: .confirmationAction) { Button("完了") { sessionsPresented = false } }
+                    }
+            }
+        }
         .sheet(isPresented: $statisticsPresented) {
             NavigationStack {
                 UsageStatisticsView(store: store)
@@ -117,6 +176,63 @@ struct ChatView: View {
             }
         }
         #endif
+    }
+    private var sessionList: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            #if os(macOS)
+            HStack {
+                Text("会話").font(.headline)
+                Spacer()
+                Button { store.createSession(); sessionsPresented = false } label: { Image(systemName: "square.and.pencil").touchTarget() }
+                    .disabled(!store.connected || store.controlBusy)
+                    .accessibilityLabel("新しい会話")
+            }.padding(.horizontal, 14).padding(.top, 12)
+            #endif
+            Text("最終活動から\(store.sessionCatalog?.retentionDays ?? 30)日で自動削除")
+                .font(.caption2).foregroundStyle(.secondary).padding(.horizontal, 14).padding(.top, 8)
+            Toggle("アーカイブを表示", isOn: $showArchived).font(.caption).padding(.horizontal, 14)
+            List {
+                ForEach((store.sessionCatalog?.items ?? []).filter { showArchived || $0.archivedAt == nil }) { session in
+                    HStack(spacing: 4) {
+                        Button {
+                            store.selectSession(session.id); sessionsPresented = false; inputFocused = false
+                        } label: {
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack(spacing: 4) {
+                                    if store.unreadSessions.contains(session.id) { Circle().fill(Color.accentColor).frame(width: 6, height: 6) }
+                                    Text(verbatim: session.title).font(.subheadline).lineLimit(2)
+                                    if session.archivedAt != nil { Image(systemName: "archivebox").font(.caption) }
+                                }
+                                if let date = UsageSnapshot.parseDate(session.lastActivityAt) {
+                                    Text(date, format: .dateTime.month().day().hour().minute()).font(.caption2).foregroundStyle(.secondary)
+                                }
+                            }.frame(maxWidth: .infinity, minHeight: 40, alignment: .leading).contentShape(Rectangle())
+                        }.buttonStyle(.plain)
+                        Menu {
+                            Button("名前を変更") {
+                                renameTarget = session; renameText = session.title
+                                #if os(iOS)
+                                pendingRename = true; sessionsPresented = false
+                                #else
+                                renaming = true
+                                #endif
+                            }
+                            Button(session.archivedAt == nil ? "アーカイブ" : "アーカイブから戻す") { store.editSession(session, archived: session.archivedAt == nil) }
+                            Button("削除", role: .destructive) {
+                                #if os(iOS)
+                                pendingDeleteTarget = session; sessionsPresented = false
+                                #else
+                                deleteTarget = session
+                                #endif
+                            }
+                                .disabled(store.sessionCatalog?.activeSessionId == session.id)
+                        } label: { Image(systemName: "ellipsis").touchTarget() }
+                            .menuStyle(.borderlessButton).fixedSize().disabled(!store.connected || store.controlBusy)
+                            .accessibilityLabel("会話の操作")
+                    }.listRowBackground(session.id == store.selectedSessionID ? Color.accentColor.opacity(0.12) : Color.clear)
+                }
+            }.listStyle(.plain)
+        }
     }
     @ViewBuilder private var backgroundJobsButton: some View {
         if let snapshot = store.backgroundJobs, !snapshot.items.isEmpty {
@@ -143,6 +259,10 @@ struct ChatView: View {
                                 VStack(alignment: .leading, spacing: 5) {
                                     Label(job.label, systemImage: job.icon).font(.subheadline.weight(.semibold))
                                     Text(verbatim: job.title).font(.subheadline).lineLimit(3)
+                                    if let sessionID = job.sessionId, let session = store.sessionCatalog?.items.first(where: { $0.id == sessionID }) {
+                                        Button(session.title) { store.selectSession(sessionID); jobsPresented = false }
+                                            .font(.caption).lineLimit(1)
+                                    }
                                     Text(job.statusLabel).font(.caption).foregroundStyle(.secondary)
                                     if let due = job.scheduledDate {
                                         Text(due, format: .dateTime.month().day().hour().minute())
@@ -236,9 +356,15 @@ struct ChatView: View {
     private var mobileHeader: some View {
         HStack(spacing: 7) {
             Circle().fill(store.connected ? Color.green : Color.secondary).frame(width: 7, height: 7)
-            Text(store.connection).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            Text(store.selectedSession?.title ?? store.connection).font(.caption).foregroundStyle(.secondary).lineLimit(1)
             backgroundJobsButton
             Spacer()
+            Button { inputFocused = false; sessionsPresented = true } label: {
+                Image(systemName: "bubble.left.and.bubble.right").touchTarget()
+                    .overlay(alignment: .topTrailing) {
+                        if !store.unreadSessions.isEmpty { Circle().fill(Color.accentColor).frame(width: 7, height: 7) }
+                    }
+            }.accessibilityLabel("会話一覧")
             Button {
                 inputFocused = false
                 menuPresented = true
@@ -259,9 +385,9 @@ struct ChatView: View {
                     Divider()
                     Button(role: .destructive) {
                         menuPresented = false
-                        confirmClear = true
+                        deleteTarget = store.selectedSession
                     } label: {
-                        Label("チャット履歴を削除", systemImage: "trash")
+                        Label("会話を削除", systemImage: "trash")
                             .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
                             .contentShape(Rectangle())
                     }

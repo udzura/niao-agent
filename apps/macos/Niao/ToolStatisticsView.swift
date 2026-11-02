@@ -11,7 +11,7 @@ struct ToolStatisticsView: View {
             VStack(alignment: .leading, spacing: 16) {
                 Text("ツール実行の統計").font(.title2.bold())
                 Picker("集計範囲", selection: $selection) {
-                    Text("今回のセッション").tag("current")
+                    Text("今回の起動").tag("current")
                     Text("全体").tag("all")
                 }.pickerStyle(.segmented)
                 HStack(spacing: 32) {
@@ -37,12 +37,12 @@ struct ToolStatisticsView: View {
                     #endif
                 }
                 Divider()
-                Text("セッションはアプリの起動から終了までです。再接続・スリープ復帰・チャット削除では区切りません。")
+                Text("集計単位はアプリの起動から終了までです。会話のセッションとは別です。再接続・スリープ復帰・チャット削除では区切りません。")
                 if selection == "current", let session {
                     Text("開始: \(session.startedAt.formatted(date: .abbreviated, time: .standard))")
                 }
                 if selection == "all" {
-                    Text("セッション別の記録").font(.headline)
+                    Text("起動別の記録").font(.headline)
                     if !store.toolStatistics.sessions.isEmpty {
                         SessionCallsChart(sessions: Array(store.toolStatistics.sessions.suffix(10)))
                     }
@@ -50,7 +50,7 @@ struct ToolStatisticsView: View {
                         HStack {
                             VStack(alignment: .leading) {
                                 Text(item.startedAt.formatted(date: .abbreviated, time: .standard))
-                                if item.id == store.toolSessionID { Text("今回のセッション").font(.caption).foregroundStyle(.secondary) }
+                                if item.id == store.toolSessionID { Text("今回の起動").font(.caption).foregroundStyle(.secondary) }
                             }
                             Spacer()
                             Text("\(item.calls) 回 / 完了通知 \(item.completed) 回").monospacedDigit()
@@ -128,9 +128,9 @@ struct ToolCallChart: View {
 struct SessionCallsChart: View {
     let sessions: [ToolSession]
     var body: some View {
-        GroupBox("直近10セッション · 呼び出し回数") {
+        GroupBox("直近10回の起動 · 呼び出し回数") {
             Chart(sessions) { session in
-                BarMark(x: .value("セッション", session.id.uuidString), y: .value("回数", session.calls))
+                BarMark(x: .value("起動", session.id.uuidString), y: .value("回数", session.calls))
                     .foregroundStyle(Color.accentColor)
                     .annotation(position: .top) { Text(session.calls.formatted()).font(.caption2).monospacedDigit() }
                     .accessibilityLabel(session.startedAt.formatted(date: .abbreviated, time: .shortened))
@@ -154,7 +154,7 @@ struct SessionCallsChart: View {
                 }
             }
             .frame(height: 160).padding(8)
-            Text("左から古い順。各セッションの日時は下の一覧で確認できます。")
+            Text("左から古い順。各起動の日時は下の一覧で確認できます。")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }

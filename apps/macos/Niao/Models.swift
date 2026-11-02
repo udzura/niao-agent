@@ -35,6 +35,7 @@ struct PartialMessage: Codable {
     var thinking: [ThinkingSegment]? = nil
 }
 struct BackgroundJob: Codable, Identifiable, Equatable {
+    var sessionId: String? = nil
     let id: String
     let kind: String
     let title: String
@@ -68,6 +69,10 @@ struct BackgroundJobsSnapshot: Codable, Equatable {
     func accepting(_ incoming: Self) -> Self { incoming.revision >= revision ? incoming : self }
 }
 struct HistoryPage: Decodable {
+    var sessionId: String? = nil
+    var sessions: SessionCatalog? = nil
+    var hasOlder: Bool? = nil
+    var beforeCursor: Int? = nil
     var jobs: BackgroundJobsSnapshot? = nil
     let epoch: Int?
     let settings: AgentSettings?
@@ -79,6 +84,8 @@ struct HistoryPage: Decodable {
     let active: PartialMessage?
 }
 struct ServerEvent: Decodable {
+    var sessionId: String? = nil
+    var sessions: SessionCatalog? = nil
     var jobs: BackgroundJobsSnapshot? = nil
     let thinking: [ThinkingSegment]?
     let name: String?
@@ -98,9 +105,38 @@ struct ServerEvent: Decodable {
 struct Submission: Codable {
     var v = 1
     var type = "send"
+    var sessionId: String? = nil
     let requestId: String
     let content: String
     var epoch: Int? = nil
+}
+struct ChatSession: Codable, Identifiable, Equatable {
+    let id: String
+    let title: String
+    let createdAt: String
+    let updatedAt: String
+    let lastActivityAt: String
+    let archivedAt: String?
+    let epoch: Int
+    let messageCount: Int?
+}
+struct SessionCatalog: Codable, Equatable {
+    let revision: Int
+    let retentionDays: Int
+    let maxSessions: Int
+    let activeSessionId: String?
+    let items: [ChatSession]
+    func accepting(_ incoming: Self) -> Self { incoming.revision >= revision ? incoming : self }
+}
+struct SessionsResponse: Decodable {
+    let v: Int
+    let sessions: SessionCatalog
+    var jobs: BackgroundJobsSnapshot? = nil
+    var session: ChatSession? = nil
+}
+struct StoredOutboxes: Codable {
+    let backend: String
+    let submissions: [String: Submission]
 }
 struct StoredSubmission: Codable {
     let backend: String
@@ -155,6 +191,10 @@ func explanation(_ code: String, details: AIErrorDetails? = nil) -> String {
         return codes.isEmpty ? message : message + "\n" + codes.joined(separator: " / ")
     }
     return switch code {
+    case "session_not_found": "この会話は削除されたか、保持期限が過ぎています。会話一覧から選び直してください。"
+    case "session_limit": "会話数の上限に達しました。不要な会話を削除してください。"
+    case "session_full": "この会話の保存量が上限に達しました。新しい会話を始めてください。"
+    case "protocol_mismatch": "複数会話に対応したサーバーとアプリを使用してください。"
     case "tool_limit": "ツールの実行回数上限に達しました。処理を小さく分けてお試しください。"
     case "invalid_tool_call": "AIが返したツール呼び出しを処理できませんでした。"
     case "unsupported_model": "このモデルは選択できません。サーバーのモデル一覧を確認してください。"

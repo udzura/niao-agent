@@ -1,4 +1,6 @@
-# Niao protocol v1
+# Niao protocol v1 / v2
+
+複数会話を利用する新クライアントは [v2の会話API・互換性](sessions.md#httpとwebsocket-v2) を使用します。以下のv1は既存 `legacy` 会話向けに維持します。
 
 Base URL is an HTTPS origin, or HTTP loopback in development. All requests require `Authorization: Bearer <NIAO_TOKEN>`, including the WebSocket HTTP upgrade. No credentials in URL parameters. Only one agent instance exists at the public API boundary.
 

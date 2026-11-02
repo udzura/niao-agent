@@ -15,28 +15,35 @@ struct SmokeMain {
         guard let token = env["NIAO_TOKEN"], token.count >= 32 else { throw NiaoError.configuration }
         let url = try BackendURL.validate(env["NIAO_BACKEND_URL"] ?? "http://127.0.0.1:8787")
         let backend = Backend(baseURL: url, token: token)
-        let before = try await backend.history(after: 0)
+        let catalogue = try await backend.sessions()
+        let sessionID: String
+        if let requested = env["NIAO_SESSION_ID"] { sessionID = requested }
+        else if let existing = catalogue.sessions.items.first { sessionID = existing.id }
+        else { sessionID = try await backend.createSession().session!.id }
+        let before = try await backend.history(after: 0, sessionID: sessionID, latest: true)
         let ws = backend.socket()
         defer { ws.cancel(with: .normalClosure, reason: nil) }
         let ready = try await Backend.event(from: ws)
-        guard ready.type == "ready", ready.v == 1 else { throw NiaoError.protocolMismatch }
+        guard ready.type == "ready", ready.v == 2 else { throw NiaoError.protocolMismatch }
         let id = CommandLine.arguments.dropFirst().first ?? UUID().uuidString.lowercased()
-        let submission = Submission(requestId: id, content: "Reply with a short greeting in Japanese.", epoch: before.epoch)
+        var submission = Submission(requestId: id, content: "Reply with a short greeting in Japanese.", epoch: before.epoch)
+        submission.v = 2; submission.sessionId = sessionID
         let data = try JSONEncoder().encode(submission)
         try await ws.send(.string(String(decoding: data, as: UTF8.self)))
         var partials = 0
         var completed: [ChatMessage] = []
         while completed.isEmpty {
             let event = try await Backend.event(from: ws)
+            guard event.sessionId == sessionID, event.requestId == id else { continue }
             if event.type == "partial" { partials += 1 }
             if event.type == "error" { throw NSError(domain: "NiaoSmoke", code: 1, userInfo: [NSLocalizedDescriptionKey: event.code ?? "unknown"]) }
             if event.type == "committed" { completed = event.messages ?? [] }
         }
         guard completed.count == 2, completed[1].role == "assistant", !completed[1].content.isEmpty else { throw NiaoError.protocolMismatch }
         ws.cancel(with: .normalClosure, reason: nil)
-        let after = try await backend.history(after: 0)
+        let after = try await backend.history(after: 0, sessionID: sessionID, latest: true)
         guard after.messages.filter({ $0.requestId == id }).count == 2 else { throw NiaoError.protocolMismatch }
-        let missed = try await backend.history(after: completed[0].seq)
+        let missed = try await backend.history(after: completed[0].seq, epoch: before.epoch, sessionID: sessionID)
         guard missed.messages.contains(where: { $0.id == completed[1].id }) else { throw NiaoError.protocolMismatch }
         let reconnected = backend.socket()
         defer { reconnected.cancel(with: .normalClosure, reason: nil) }
@@ -44,6 +51,7 @@ struct SmokeMain {
         try await reconnected.send(.string(String(decoding: data, as: UTF8.self)))
         while true {
             let event = try await Backend.event(from: reconnected)
+            guard event.sessionId == sessionID, event.requestId == id else { continue }
             if event.type == "committed" {
                 guard event.messages == completed else { throw NiaoError.protocolMismatch }
                 break

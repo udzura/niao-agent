@@ -170,3 +170,7 @@ The model catalog also includes `@cf/meta/llama-3.3-70b-instruct-fp8-fast`, `@cf
 
 
 Qwen3 30B A3B FP8 (`@cf/qwen/qwen3-30b-a3b-fp8`) uses the same Qwen output adapter and tool loop. Its separate request policy uses `max_tokens` (2048 OFF / 4096 ON) and Qwen's per-turn `/think` or `/no_think` soft directive on a copy of the latest user message. It does not assume the Qwen 3.8 reasoning-effort/template API is available. The directive is not persisted and does not change during tool continuations. Soft switching is best-effort; observed reasoning is always separated. See [Thinking and pricing](automatic-thinking.md#qwen3-30b-a3b-fp8).
+
+## 複数の会話 (2026-11-02)
+
+`personal` AgentのSQLite内に会話を分け、モデル設定・利用量・推論ゲートは共通化する。会話の寿命は `lastActivityAt`、メタデータの更新は `updatedAt` で管理する。保持期限30日と明示削除の両方を持つ。WebSocketはv2で多重化し、HTTPで会話ごとの履歴を復元する。非同期結果は画面選択と独立して依頼元へ戻す。[保存・移行・API・制限](sessions.md)を参照。

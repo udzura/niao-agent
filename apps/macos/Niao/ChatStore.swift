@@ -16,6 +16,18 @@ final class ChatStore: ObservableObject {
     @Published var controlBusy = false
     @Published var backgroundJobs: BackgroundJobsSnapshot?
     @Published var runningToolName: String?
+    @Published var sessionCatalog: SessionCatalog?
+    @Published var selectedSessionID: String?
+    @Published var unreadSessions: Set<String> = []
+    @Published var hasOlderMessages = false
+    @Published var historyLoading = false
+    private var oldestCursor: Int?
+    private var selectionRevision = 0
+    private var drafts: [String: String] = [:]
+    private var lastRead: [String: String] = [:]
+    private var outboxes: [String: Submission] = [:]
+    var selectedSession: ChatSession? { sessionCatalog?.items.first { $0.id == selectedSessionID } }
+    var agentBusy: Bool { sessionCatalog?.activeSessionId != nil || busy }
     private var historyEpoch: Int?
     @Published var messages: [ChatMessage] = []
     @Published var usage: UsageSnapshot?
@@ -60,10 +72,20 @@ final class ChatStore: ObservableObject {
                 toolStatisticsError = "統計ファイルを読み込めませんでした。既存ファイルを保護するため保存を停止しています。"
             }
             if let data = try? Data(contentsOf: outboxURL) {
-                let stored = try JSONDecoder().decode(StoredSubmission.self, from: data)
-                if stored.backend == backendURL { outbox = stored.submission }
+                if let stored = try? JSONDecoder().decode(StoredOutboxes.self, from: data) {
+                    if stored.backend == backendURL { outboxes = stored.submissions }
+                } else {
+                    let stored = try JSONDecoder().decode(StoredSubmission.self, from: data)
+                    if stored.backend == backendURL {
+                        var pending = stored.submission
+                        pending.v = 2; pending.sessionId = "legacy"
+                        outboxes["legacy"] = pending
+                    }
+                }
+
             }
         } catch { self.error = "未送信メッセージの復元に失敗しました。\(error.localizedDescription)" }
+        lastRead = UserDefaults.standard.dictionary(forKey: "sessionLastRead." + backendURL) as? [String: String] ?? [:]
         toolSessionID = toolStatistics.beginSession()
         saveToolStatistics()
         #if os(macOS)
@@ -77,14 +99,14 @@ final class ChatStore: ObservableObject {
         #endif
     }
     var busy: Bool { partial != nil || turns.contains { $0.status == "running" } }
-    var canSend: Bool { connected && !controlBusy && !busy && outbox == nil && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && draft.utf16.count <= 8000 }
+    var canSend: Bool { connected && !controlBusy && !agentBusy && !historyLoading && selectedSessionID != nil && outbox == nil && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && draft.utf16.count <= 8000 }
 
     func saveSettings(url: String, token: String) async throws {
         let valid = try BackendURL.validate(url).absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         let secret = token.trimmingCharacters(in: .whitespacesAndNewlines)
         guard secret.count >= 32, !secret.contains("\n"), !secret.contains("\r") else { throw NiaoError.configuration }
         // Keep an uncertain send tied to its original server rather than sending it elsewhere.
-        if valid != backendURL && outbox != nil {
+        if valid != backendURL && !outboxes.isEmpty {
             throw NSError(domain: "Niao", code: 1, userInfo: [NSLocalizedDescriptionKey: "未送信メッセージを再送するか破棄してから接続先を変更してください。"])
         }
         try await Keychain.save(secret, backend: valid)
@@ -93,6 +115,7 @@ final class ChatStore: ObservableObject {
         UserDefaults.standard.set(valid, forKey: "backendURL")
         messages = []; cursor = 0; turns = []; partial = nil
         historyEpoch = nil; agentSettings = nil; backgroundJobs = nil
+        sessionCatalog = nil; selectedSessionID = nil; drafts = [:]; unreadSessions = []; lastRead = UserDefaults.standard.dictionary(forKey: "sessionLastRead." + valid) as? [String: String] ?? [:]
         toolToast.clear()
         usage = nil; usageError = nil; usageRefreshAt = nil
         platformUsage = nil; platformUsageError = nil
@@ -135,12 +158,21 @@ final class ChatStore: ObservableObject {
                 guard token.count >= 32 else { throw NiaoError.configuration }
                 let backend = Backend(baseURL: base, token: token)
                 self.backend = backend
+                let catalogue = try await backend.sessions()
+                guard generation == id, !Task.isCancelled else { return }
+                sessionCatalog = nil
+                acceptCatalog(catalogue.sessions)
+                acceptJobs(catalogue.jobs)
+                if selectedSessionID == nil {
+                    let saved = UserDefaults.standard.string(forKey: "selectedSession." + backendURL)
+                    selectLocal(catalogue.sessions.items.first(where: { $0.id == saved })?.id ?? catalogue.sessions.items.first?.id)
+                }
                 // Auth check before the upgrade gives a useful 401 message to the UI.
                 try await synchronize(backend, id: id)
                 let ws = backend.socket()
                 socket = ws
                 let ready = try await Backend.event(from: ws)
-                guard ready.type == "ready", ready.v == 1 else { throw NiaoError.protocolMismatch }
+                guard ready.type == "ready", ready.v == 2 else { throw NiaoError.protocolMismatch }
                 // Subscribe before the final sync: events during HTTP are queued by URLSession.
                 try await synchronize(backend, id: id)
                 guard generation == id, !Task.isCancelled else { return }
@@ -197,13 +229,18 @@ final class ChatStore: ObservableObject {
         }
     }
     private func synchronize(_ backend: Backend, id: UUID) async throws {
+        guard let sessionID = selectedSessionID else { return }
+        let selection = selectionRevision
         var more = true
         while more {
             let revision = eventRevision
             let settingsVersion = settingsRevision
-            let page = try await backend.history(after: cursor, epoch: historyEpoch)
-            guard generation == id, !Task.isCancelled else { throw CancellationError() }
+            let page = try await backend.history(after: cursor, epoch: historyEpoch, sessionID: sessionID, latest: cursor == 0)
+            guard generation == id, selectionRevision == selection, selectedSessionID == sessionID, !Task.isCancelled else { return }
             guard acceptEpoch(page.epoch ?? 0) else { continue }
+            if let catalogue = page.sessions { acceptCatalog(catalogue) }
+            if page.hasOlder == true { hasOlderMessages = true }
+            if oldestCursor == nil { oldestCursor = page.beforeCursor ?? page.messages.first?.seq }
             if let jobs = page.jobs { acceptJobs(jobs) } else { backgroundJobs = nil }
             messages = mergeMessages(messages, page.messages)
             cursor = page.cursor
@@ -216,9 +253,42 @@ final class ChatStore: ObservableObject {
             more = page.hasMore
         }
         if let pending = outbox, messages.contains(where: { $0.requestId == pending.requestId }) { clearOutbox() }
+        if let session = selectedSession {
+            lastRead[session.id] = session.lastActivityAt
+            UserDefaults.standard.set(lastRead, forKey: "sessionLastRead." + backendURL)
+        }
     }
     private func handle(_ event: ServerEvent) {
-        guard event.v == 1 else { return } // Ignore SDK housekeeping if introduced later.
+        guard event.v == 2 else { return }
+        if let catalogue = event.sessions { acceptCatalog(catalogue) }
+        acceptJobs(event.jobs)
+        if event.type == "settings_updated" {
+            settingsRevision += 1; agentSettings = event.settings; return
+        }
+        if event.type == "session_deleted" {
+            if let id = event.sessionId {
+                drafts.removeValue(forKey: id); outboxes.removeValue(forKey: id); unreadSessions.remove(id)
+                saveOutboxes()
+                if selectedSessionID == id { selectLocal(nil); chooseAvailableSession() }
+            }
+            return
+        }
+        if event.type == "tool_status" {
+            if let requestID = event.requestId, let name = event.name, let status = event.status {
+                let newCall = toolStatistics.observe(sessionID: toolSessionID, backend: backendURL, epoch: event.epoch ?? 0,
+                                       requestID: requestID, name: name, status: status)
+                if newCall && event.sessionId == selectedSessionID { toolToast.show(name: name) }
+                saveToolStatistics()
+            }
+        }
+        if let target = event.sessionId, target != selectedSessionID {
+            if ["committed", "message_added"].contains(event.type) { unreadSessions.insert(target) }
+            if ["accepted", "committed", "error"].contains(event.type), outboxes[target]?.requestId == event.requestId, event.type != "error" {
+                outboxes.removeValue(forKey: target); saveOutboxes()
+            }
+            return
+        }
+        guard event.sessionId != nil else { return }
         guard acceptEpoch(event.epoch ?? 0) else { return }
         eventRevision += 1
         acceptJobs(event.jobs)
@@ -229,12 +299,7 @@ final class ChatStore: ObservableObject {
             } else if event.status == "completed", event.name == nil || event.name == runningToolName {
                 runningToolName = nil
             }
-            if let requestID = event.requestId, let name = event.name, let status = event.status {
-                let newCall = toolStatistics.observe(sessionID: toolSessionID, backend: backendURL, epoch: event.epoch ?? 0,
-                                       requestID: requestID, name: name, status: status)
-                if newCall { toolToast.show(name: name) }
-                saveToolStatistics()
-            }
+
         case "history_cleared": break // acceptEpoch already reset the local conversation.
         case "settings_updated":
             settingsRevision += 1
@@ -295,12 +360,125 @@ final class ChatStore: ObservableObject {
         catch { toolStatisticsError = "統計の保存に失敗しました。表示中の値はメモリ上の記録です。" }
     }
     // Epochs fence old HTTP replies, buffered socket events and persisted offline sends.
+    private func acceptCatalog(_ incoming: SessionCatalog) {
+        let previous = sessionCatalog
+        let accepted = previous?.accepting(incoming) ?? incoming
+        sessionCatalog = accepted
+        for session in accepted.items where session.id != selectedSessionID && (session.messageCount ?? 0) > 0 {
+            if session.lastActivityAt > (lastRead[session.id] ?? "") { unreadSessions.insert(session.id) }
+        }
+        let validIDs = Set(accepted.items.map(\.id))
+        unreadSessions = unreadSessions.intersection(validIDs)
+        let remaining = outboxes.filter { validIDs.contains($0.key) }
+        if remaining.count != outboxes.count { outboxes = remaining; saveOutboxes() }
+        drafts = drafts.filter { validIDs.contains($0.key) }
+        guard previous != accepted else { return }
+        if let current = selectedSessionID, !accepted.items.contains(where: { $0.id == current }) {
+            selectLocal(nil)
+            drafts.removeValue(forKey: current); outboxes.removeValue(forKey: current); saveOutboxes()
+            chooseAvailableSession()
+        }
+    }
+    private func selectLocal(_ id: String?) {
+        guard id != selectedSessionID else { return }
+        if let previous = selectedSessionID { drafts[previous] = draft }
+        selectionRevision += 1
+        selectedSessionID = id
+        UserDefaults.standard.set(id, forKey: "selectedSession." + backendURL)
+        messages = []; turns = []; partial = nil; cursor = 0; oldestCursor = nil
+        historyEpoch = nil; runningToolName = nil; toolToast.clear(); hasOlderMessages = false
+        draft = id.flatMap { drafts[$0] } ?? ""
+        outbox = id.flatMap { outboxes[$0] }
+        if let id {
+            unreadSessions.remove(id)
+            lastRead[id] = sessionCatalog?.items.first(where: { $0.id == id })?.lastActivityAt
+            UserDefaults.standard.set(lastRead, forKey: "sessionLastRead." + backendURL)
+        }
+    }
+    private func chooseAvailableSession() {
+        let items = sessionCatalog?.items ?? []
+        selectLocal(items.first(where: { $0.archivedAt == nil })?.id ?? items.first?.id)
+        loadSelectedHistory()
+    }
+    func selectSession(_ id: String) {
+        guard sessionCatalog?.items.contains(where: { $0.id == id }) == true else { return }
+        selectLocal(id)
+        loadSelectedHistory()
+    }
+    private func loadSelectedHistory() {
+        guard let backend, selectedSessionID != nil else { historyLoading = false; return }
+        let id = generation, selection = selectionRevision
+        historyLoading = true
+        Task {
+            defer { if generation == id && selectionRevision == selection { historyLoading = false } }
+            do { try await synchronize(backend, id: id) }
+            catch {
+                guard generation == id, selectionRevision == selection else { return }
+                self.error = error.localizedDescription
+                if case NiaoError.http(404) = error { reconnect() }
+            }
+        }
+    }
+    func createSession() {
+        guard connected, !controlBusy, let backend else { return }
+        controlBusy = true; let id = generation
+        Task {
+            defer { if generation == id { controlBusy = false } }
+            do {
+                let result = try await backend.createSession()
+                guard generation == id else { return }
+                acceptCatalog(result.sessions)
+                if let session = result.session { selectSession(session.id) }
+            } catch { if generation == id { self.error = error.localizedDescription; reconnect() } }
+        }
+    }
+    func editSession(_ session: ChatSession, title: String? = nil, archived: Bool? = nil) {
+        guard connected, !controlBusy, let backend else { return }
+        controlBusy = true; let id = generation
+        Task {
+            defer { if generation == id { controlBusy = false } }
+            do {
+                let result = try await backend.editSession(session.id, title: title, archived: archived)
+                guard generation == id else { return }
+                acceptCatalog(result.sessions)
+            } catch { if generation == id { self.error = error.localizedDescription; reconnect() } }
+        }
+    }
+    func deleteSession(_ session: ChatSession) {
+        guard connected, !controlBusy, sessionCatalog?.activeSessionId != session.id, let backend else { return }
+        controlBusy = true; let id = generation
+        Task {
+            defer { if generation == id { controlBusy = false } }
+            do {
+                try await backend.deleteSession(session)
+                let result = try await backend.sessions()
+                guard generation == id else { return }
+                acceptCatalog(result.sessions); acceptJobs(result.jobs)
+            } catch { if generation == id { self.error = error.localizedDescription; reconnect() } }
+        }
+    }
+    func loadOlderMessages() {
+        guard let backend, let session = selectedSessionID, let before = oldestCursor, hasOlderMessages, !historyLoading else { return }
+        let id = generation, selection = selectionRevision
+        historyLoading = true
+        Task {
+            defer { if generation == id && selectionRevision == selection { historyLoading = false } }
+            do {
+                let page = try await backend.history(after: 0, epoch: historyEpoch, sessionID: session, before: before)
+                guard generation == id, selectionRevision == selection, selectedSessionID == page.sessionId else { return }
+                guard acceptEpoch(page.epoch ?? 0) else { return }
+                messages = mergeMessages(messages, page.messages)
+                oldestCursor = page.beforeCursor
+                hasOlderMessages = page.hasOlder == true
+            } catch { if generation == id && selectionRevision == selection { self.error = error.localizedDescription } }
+        }
+    }
+
     @discardableResult
     private func acceptEpoch(_ incoming: Int) -> Bool {
         if let current = historyEpoch, incoming < current { return false }
         if let current = historyEpoch, incoming > current {
-            messages = []; turns = []; partial = nil; cursor = 0; draft = ""
-            backgroundJobs = nil
+            messages = []; turns = []; partial = nil; cursor = 0; draft = ""; oldestCursor = nil; hasOlderMessages = false
             runningToolName = nil
             toolToast.clear()
         }
@@ -336,15 +514,15 @@ final class ChatStore: ObservableObject {
         }
     }
     func clearHistory() {
-        guard connected, !busy, !controlBusy, let backend, let epoch = historyEpoch else { return }
+        guard connected, !busy, !controlBusy, let backend, let epoch = historyEpoch, let sessionID = selectedSessionID else { return }
         controlBusy = true
         let id = generation
         Task {
             defer { if generation == id { controlBusy = false } }
             do {
-                let result = try await backend.clearHistory(epoch: epoch)
+                let result = try await backend.clearHistory(epoch: epoch, sessionID: sessionID)
                 guard generation == id else { return }
-                acceptEpoch(result.epoch)
+                if selectedSessionID == sessionID { acceptEpoch(result.epoch) }
                 error = nil
             } catch {
                 guard generation == id else { return }
@@ -402,17 +580,19 @@ final class ChatStore: ObservableObject {
     }
     func send() {
         guard canSend else { return }
-        let pending = Submission(requestId: UUID().uuidString.lowercased(), content: draft.trimmingCharacters(in: .whitespacesAndNewlines), epoch: historyEpoch)
+        var pending = Submission(requestId: UUID().uuidString.lowercased(), content: draft.trimmingCharacters(in: .whitespacesAndNewlines), epoch: historyEpoch)
+        pending.v = 2; pending.sessionId = selectedSessionID
         do { try persistOutbox(pending); draft = ""; sendPending(pending) }
         catch { self.error = error.localizedDescription }
     }
     func retry(_ message: ChatMessage) {
-        guard connected, !controlBusy, !busy, outbox == nil else { return }
-        let pending = Submission(requestId: message.requestId, content: message.content, epoch: historyEpoch)
+        guard connected, !controlBusy, !agentBusy, !historyLoading, outbox == nil else { return }
+        var pending = Submission(requestId: message.requestId, content: message.content, epoch: historyEpoch)
+        pending.v = 2; pending.sessionId = selectedSessionID
         do { try persistOutbox(pending); sendPending(pending) }
         catch { self.error = error.localizedDescription }
     }
-    func resendOutbox() { if let pending = outbox, connected, !controlBusy, !busy { sendPending(pending) } }
+    func resendOutbox() { if let pending = outbox, connected, !controlBusy, !agentBusy, !historyLoading { sendPending(pending) } }
     func discardOutbox() { clearOutbox() }
     private func sendPending(_ pending: Submission) {
         guard let ws = socket else { return }
@@ -431,15 +611,22 @@ final class ChatStore: ObservableObject {
         try await ws.send(.string(String(decoding: data, as: UTF8.self)))
     }
     private func persistOutbox(_ pending: Submission) throws {
-        let data = try JSONEncoder().encode(StoredSubmission(backend: backendURL, submission: pending))
-        try data.write(to: outboxURL, options: .atomic)
+        guard let sessionID = pending.sessionId else { throw NiaoError.protocolMismatch }
+        var next = outboxes; next[sessionID] = pending
+        let stored = StoredOutboxes(backend: backendURL, submissions: next)
+        try JSONEncoder().encode(stored).write(to: outboxURL, options: [.atomic, .completeFileProtection])
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: outboxURL.path)
-        outbox = pending
+        outboxes = next; outbox = pending
+    }
+    private func saveOutboxes() {
+        do {
+            try JSONEncoder().encode(StoredOutboxes(backend: backendURL, submissions: outboxes))
+                .write(to: outboxURL, options: [.atomic, .completeFileProtection])
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: outboxURL.path)
+        } catch { self.error = "未送信状態の保存に失敗しました。\(error.localizedDescription)" }
     }
     private func clearOutbox() {
-        do {
-            if FileManager.default.fileExists(atPath: outboxURL.path) { try FileManager.default.removeItem(at: outboxURL) }
-            outbox = nil
-        } catch { self.error = "未送信状態の保存に失敗しました。\(error.localizedDescription)" }
+        if let id = selectedSessionID { outboxes.removeValue(forKey: id) }
+        outbox = nil; saveOutboxes()
     }
 }

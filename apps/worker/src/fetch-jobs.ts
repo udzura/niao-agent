@@ -17,7 +17,7 @@ export const fetchJobResult = z.union([
 ]).refine(value=>new TextEncoder().encode(JSON.stringify(value)).byteLength <= 65536);
 export type FetchJobResult = z.infer<typeof fetchJobResult>;
 export interface FetchJob {
-  id:string; epoch:number; requestId:string; url:string;
+  id:string; epoch:number; requestId:string; url:string; sessionId:string;
   status:"pending"|"queued"|"running"|"ready"|"notified"|"cancelled";
   createdAt:number; updatedAt:number; dispatchAttempts:number;
   runToken:string|null; leaseUntil:number; result:string|null;

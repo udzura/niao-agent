@@ -180,3 +180,12 @@ Wrangler and Xcode initially encountered this execution environment's filesystem
 - Both windows observe the same ChatStore. Existing automatic usage refresh and local tool-statistics persistence are unchanged. The Neurons view refreshes on opening; tool current/all selection stays in the parent window when switching sections. No Worker/API/schema changes are required.
 - All **30 Swift tests** and the Xcode macOS build pass. This is a presentation refactor; no redundant view-structure unit tests were added. Rendered the actual compact/Neurons/tool views in isolated NSHostingViews, including all-session records and empty/error states, in light/dark mode. Fixture-only initial selections cover both sections. Verified a refresh on opening Neurons and no refresh from the compact main view. No real Keychain, backend, user files, or persisted statistics were accessed.
 - Native in-app switching and window/menu activation remain a manual smoke check. Rebuild/relaunch only the macOS app to apply this change; no deployment was performed or needed.
+
+## 複数会話 (2026-11-02)
+
+- Worker全体: 18ファイル・297テスト成功。会話機能14テストで実workerd/SQLiteの移行、実際のeviction、v1隔離、単一ソケット多重化、文脈・ジョブ分離、期限切れ／明示削除、容量制限を検証。最終の索引・容量確認変更後にAgent／会話の57テストも成功。
+- Swift: 49テスト成功（v2デコード、カタログ順序、複数outbox、既存形式、履歴ページ境界を含む）。
+- Worker型検査・deploy dry-run、macOSアプリ、iPhone 16 Pro用iOSアプリのビルド成功。
+- iOS UIテスト: 会話一覧、保持期限表示、メニュー、設定、Thinking、複数行入力を含む1件成功。画面上のソフトウェアキーボード位置の1件はheadless Simulatorの制約でスキップ。会話一覧スクリーンショットも確認。入力済み会話のサイドバーや名前変更／削除の実機操作は未検証。
+- URLSession live smokeコマンドもv2へ対応。コンパイルは確認、今回の本番接続・実推論は未実行。
+- 本番デプロイ、Freeプラン上のCPU／ストレージ計測は実行していない。
