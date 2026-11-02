@@ -12,6 +12,7 @@ struct ChatView: View {
     @State private var menuPresented = false
     @State private var thinkingPresented = false
     #endif
+    @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var multiline = false
     @State private var sessionsPresented = false
@@ -24,6 +25,13 @@ struct ChatView: View {
     @State private var pendingRename = false
     @State private var jobsPresented = false
     @FocusState private var inputFocused: Bool
+    private var conversationCovered: Bool {
+        #if os(iOS)
+        store.settingsPresented || sessionsPresented || statisticsPresented
+        #else
+        store.settingsPresented
+        #endif
+    }
     var body: some View {
         HStack(spacing: 0) {
             #if os(macOS)
@@ -32,6 +40,17 @@ struct ChatView: View {
             #endif
             conversationBody
         }
+        .onAppear {
+            store.conversationCoverChanged(conversationCovered)
+            store.conversationAppeared(active: scenePhase == .active)
+            #if os(macOS)
+            let action = openWindow
+            store.revealChatWindow = { action(id: "chat") }
+            #endif
+        }
+        .onDisappear { store.conversationDisappeared() }
+        .onChange(of: scenePhase) { _, phase in store.conversationActivityChanged(phase == .active) }
+        .onChange(of: conversationCovered) { _, covered in store.conversationCoverChanged(covered) }
     }
     private var conversationBody: some View {
         VStack(spacing: 0) {
@@ -691,6 +710,8 @@ struct SettingsView: View {
                 Text(credentialDescription)
                     .font(.caption).foregroundStyle(.secondary)
                 Divider()
+                SystemNotificationSettings(notifications: store.systemNotifications)
+                Divider()
                 if let settings = store.agentSettings {
                     Text("接続中の Agent のモデル設定").font(.headline)
                     Picker("モデル", selection: $selectedModel) {
@@ -759,6 +780,27 @@ struct SettingsView: View {
         catch { self.error = error.localizedDescription }
     }
 
+}
+
+private struct SystemNotificationSettings: View {
+    @ObservedObject var notifications: SystemNotifications
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("通知").font(.headline)
+            Toggle("ジョブ結果をOS通知とバッジで知らせる", isOn: Binding(
+                get: { notifications.enabled }, set: { notifications.setEnabled($0) }))
+                .disabled(notifications.requesting)
+                .accessibilityIdentifier("system-notifications-toggle")
+            if notifications.requesting { ProgressView().controlSize(.small) }
+            Text(notifications.statusLabel).font(.caption).foregroundStyle(.secondary)
+            Text("未読のジョブ結果: \(notifications.unreadCount)件").font(.caption).monospacedDigit()
+            Text("実行中に受信した結果だけを通知します。バッジは未読のジョブ結果の件数です。表示中の会話の結果は既読になり、他の会話も開くと既読になります。通知予約は行いません。表示方法はOSの通知設定・集中モードに従います。")
+                .font(.caption).foregroundStyle(.secondary)
+            Button("通知の許可状態を再確認") { notifications.refresh() }
+                .font(.caption).disabled(notifications.requesting)
+            if let error = notifications.error { Text(error).font(.caption).foregroundStyle(.orange) }
+        }.task { notifications.refresh() }
+    }
 }
 
 private extension View {

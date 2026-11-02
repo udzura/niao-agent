@@ -7,6 +7,20 @@ import Foundation
 @MainActor
 final class ChatStore: ObservableObject {
     @Published var toolToast = ToolCallToastState()
+    let systemNotifications: SystemNotifications
+    var revealChatWindow: (() -> Void)?
+    private var pendingNotificationTarget: NotificationTarget?
+    private var conversationPresented = false
+    private var conversationCovered = false
+    private var appActive = false
+    private var viewingConversation: Bool {
+        guard conversationPresented, !conversationCovered, appActive else { return false }
+        #if os(macOS)
+        return NSApplication.shared.isActive && NSApplication.shared.keyWindow?.title == "Niao"
+        #else
+        return true
+        #endif
+    }
     @Published var toolStatistics = ToolStatistics()
     @Published var toolStatisticsError: String?
     private(set) var toolSessionID = UUID()
@@ -63,6 +77,8 @@ final class ChatStore: ObservableObject {
     init() {
         let folder = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Niao")
         outboxURL = folder.appendingPathComponent("outbox.json")
+        let initialBackend = UserDefaults.standard.string(forKey: "backendURL") ?? "http://127.0.0.1:8787"
+        systemNotifications = SystemNotifications(backend: initialBackend, storageURL: folder.appendingPathComponent("notification-inbox.json"))
         do {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             toolStatisticsURL = folder.appendingPathComponent("tool-statistics.json")
@@ -86,6 +102,7 @@ final class ChatStore: ObservableObject {
             }
         } catch { self.error = "未送信メッセージの復元に失敗しました。\(error.localizedDescription)" }
         lastRead = UserDefaults.standard.dictionary(forKey: "sessionLastRead." + backendURL) as? [String: String] ?? [:]
+        systemNotifications.onOpen = { [weak self] target in self?.openSystemNotification(target) }
         toolSessionID = toolStatistics.beginSession()
         saveToolStatistics()
         #if os(macOS)
@@ -111,6 +128,8 @@ final class ChatStore: ObservableObject {
         }
         try await Keychain.save(secret, backend: valid)
         try Task.checkCancellation()
+        systemNotifications.changeBackend(valid)
+        pendingNotificationTarget = nil
         backendURL = valid
         UserDefaults.standard.set(valid, forKey: "backendURL")
         messages = []; cursor = 0; turns = []; partial = nil
@@ -121,11 +140,11 @@ final class ChatStore: ObservableObject {
         platformUsage = nil; platformUsageError = nil
         reconnect()
     }
-    func start() { if loop == nil { reconnect() } }
+    func start() { systemNotifications.refresh(); if loop == nil { reconnect() } }
     func resume() { if !connected && loop == nil && !authenticationBlocked { reconnect() } }
-    func suspend() { Keychain.lock(); disconnect(); connection = "ロック中" }
+    func suspend() { appActive = false; Keychain.lock(); disconnect(); connection = "ロック中" }
     #if os(macOS)
-    @objc private func wake() { resume() }
+    @objc private func wake() { conversationActivityChanged(true); resume() }
     @objc private func sleep() { suspend() }
     #endif
     private func disconnect() {
@@ -177,6 +196,7 @@ final class ChatStore: ObservableObject {
                 try await synchronize(backend, id: id)
                 guard generation == id, !Task.isCancelled else { return }
                 connected = true; connection = "接続済み"; error = nil; retryAttempt = 0
+                applyPendingNotification()
                 refreshUsage()
                 if let pending = outbox, !messages.contains(where: { $0.requestId == pending.requestId }) {
                     try await transmit(pending, on: ws)
@@ -257,6 +277,9 @@ final class ChatStore: ObservableObject {
             lastRead[session.id] = session.lastActivityAt
             UserDefaults.standard.set(lastRead, forKey: "sessionLastRead." + backendURL)
         }
+        if viewingConversation, let session = selectedSession {
+            systemNotifications.markRead(NotificationTarget(sessionID: session.id, epoch: session.epoch))
+        }
     }
     private func handle(_ event: ServerEvent) {
         guard event.v == 2 else { return }
@@ -272,6 +295,12 @@ final class ChatStore: ObservableObject {
                 if selectedSessionID == id { selectLocal(nil); chooseAvailableSession() }
             }
             return
+        }
+        if event.type == "message_added", let session = sessionCatalog?.items.first(where: { $0.id == event.sessionId }) {
+            if let notice = BackgroundResultNotification.from(event, session: session) {
+                let alreadyRead = viewingConversation && selectedSessionID == session.id
+                systemNotifications.receive(notice, alreadyRead: alreadyRead)
+            }
         }
         if event.type == "tool_status" {
             if let requestID = event.requestId, let name = event.name, let status = event.status {
@@ -364,6 +393,7 @@ final class ChatStore: ObservableObject {
         let previous = sessionCatalog
         let accepted = previous?.accepting(incoming) ?? incoming
         sessionCatalog = accepted
+        systemNotifications.reconcile(accepted.items)
         for session in accepted.items where session.id != selectedSessionID && (session.messageCount ?? 0) > 0 {
             if session.lastActivityAt > (lastRead[session.id] ?? "") { unreadSessions.insert(session.id) }
         }
@@ -404,6 +434,39 @@ final class ChatStore: ObservableObject {
         guard sessionCatalog?.items.contains(where: { $0.id == id }) == true else { return }
         selectLocal(id)
         loadSelectedHistory()
+    }
+    func conversationAppeared(active: Bool) {
+        conversationPresented = true
+        conversationActivityChanged(active)
+    }
+    func conversationDisappeared() { conversationPresented = false }
+    func conversationCoverChanged(_ covered: Bool) {
+        conversationCovered = covered
+        if !covered { markVisibleNotificationsRead() }
+    }
+    func conversationActivityChanged(_ active: Bool) {
+        appActive = active
+        if active { systemNotifications.refresh(); markVisibleNotificationsRead() }
+    }
+    private func markVisibleNotificationsRead() {
+        guard viewingConversation, !historyLoading, let session = selectedSession else { return }
+        systemNotifications.markRead(NotificationTarget(sessionID: session.id, epoch: session.epoch))
+    }
+    private func openSystemNotification(_ target: NotificationTarget) {
+        pendingNotificationTarget = target
+        revealChatWindow?()
+        #if os(macOS)
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        #endif
+        applyPendingNotification()
+    }
+    private func applyPendingNotification() {
+        guard connected, let catalog = sessionCatalog, let target = pendingNotificationTarget else { return }
+        pendingNotificationTarget = nil
+        guard catalog.items.contains(where: { $0.id == target.sessionID && $0.epoch == target.epoch }) else {
+            error = explanation("session_not_found"); return
+        }
+        selectSession(target.sessionID)
     }
     private func loadSelectedHistory() {
         guard let backend, selectedSessionID != nil else { historyLoading = false; return }

@@ -23,6 +23,24 @@
 
 容量上限は50会話（アーカイブを含む）、1会話の本文＋Thinking合計8MiBです。約2,000メッセージを目安に新規送信を止め、応答・Thinking・通知のため768KiBと32メッセージ分を予約します。SQLiteトリガーも本文＋Thinkingの8MiB上限を強制します。DB全体の物理サイズではなく本文サイズの制限です。既存の大きな会話は削らず閲覧可能ですが、新しい入力を止めます。上限では `session_limit`／`session_full` を返し、古い会話を勝手に押し出しません。
 
+## OS通知とアイコンのバッジ
+
+設定の「ジョブ結果をOS通知とバッジで知らせる」をONにすると、OSへ通知とバッジの許可を求めます。既定はOFFで、初回起動時・単なるジョブ受信時には許可ダイアログを出しません。サウンドの許可は求めず、通知にも音を付けません。拒否後はOSのNiao通知設定で許可し、「通知の許可状態を再確認」から状態を更新できます。通知とバッジの片方のみ許可した場合も個別に尊重します。
+
+- 既存の確定 `message_added` を受信した時だけ、`UserNotifications` のローカル通知を即時登録します。完了を知らせるアプリ内バナーは表示せず、OS通知と未読バッジに統一します。ツール実行時の短いポップ表示は継続します。
+- 前面でもOSバナーと通知センターのリストに表示できます。実際の表示・プレビュー・集中モードによる抑制はOS設定に従います。
+- バッジは、この端末が受信した未読の**ジョブ結果の件数**です。通常のチャットメッセージや、履歴同期で初めて取得した結果を新しい通知として加算しません。
+- 会話を前面で読んでいる場合、その会話の新しい結果は既読として扱い、OS通知は出してもバッジを増やしません。他会話・非表示の会話の結果は未読へ加算します。会話の取得完了後、該当会話の未読を解除します。
+- OS通知のタップは保存済みIDから会話を特定します。接続・本人確認後に移動し、既読にします。Macはチャットウィンドウも開きます。会話削除や履歴クリア後の通知は除去し、古いepochへの移動を拒否します。
+- 通知の二重登録を避け、OS登録・削除・バッジ更新を直列化します。接続先変更や処理中の削除があっても、古い結果の通知を残しません。
+- `notification-inbox.json` に接続先・通知ID・会話ID・epoch・既読状態と会話ごとの未読数だけを保存します。本文プレビューやトークンは保存しません。直近512件の通知IDを保持し、古いIDを整理しても会話ごとの未読件数は失いません。保存ファイルは0600、OSのファイル保護を適用します。
+
+今回の対象は**アプリが結果を受信できる間だけ**です。iOSがバックグラウンドへ移行してWebSocketを停止している間には、新たなジョブ完了を検知できません。すでにOSへ登録した通知は通知センターで確認できます。APNs・Push Notifications capability・サーバー変更は使いません。日時を指定する端末の予約通知はpendingで、実装していません。
+
+反映はMac／iPhoneアプリの再ビルドだけです。Workerの再デプロイは不要です。
+
+参考: [Appleの通知許可](https://developer.apple.com/documentation/usernotifications/asking-permission-to-use-notifications)、[ローカル通知](https://developer.apple.com/documentation/usernotifications/scheduling-a-notification-locally-from-your-app)、[バッジ更新](https://developer.apple.com/documentation/usernotifications/unusernotificationcenter/setbadgecount(_:withcompletionhandler:))。
+
 ## 保存と移行
 
 `niao_sessions` は `id,title,createdAt,updatedAt,lastActivityAt,archivedAt,epoch` を持ちます。既存のmessages、turns、thinking、fetch_jobs、remindersに `sessionId` を追加します。起動時のトランザクションで移行し、既存のID・seq・epochを維持して最初の `legacy` 会話へ所属させます。初期化済みマーカーを保存するため、`legacy` を削除しても再作成されません。

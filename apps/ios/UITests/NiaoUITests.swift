@@ -38,6 +38,7 @@ final class NiaoUITests: XCTestCase {
         settings.tap()
         XCTAssertTrue(app.textFields["backend-url"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.secureTextFields["backend-token"].exists)
+        XCTAssertTrue(app.switches["system-notifications-toggle"].exists)
         capture("iPhone-settings")
         app.buttons["キャンセル"].tap()
 

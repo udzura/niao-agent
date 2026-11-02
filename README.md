@@ -11,6 +11,7 @@ macOS / iPhoneで使えるパーソナル AI コンパニオンの Phase 1。Swi
 - Gemma 4・Qwen3・Qwen 3.8のthinkingは回答と分離し、「思考過程」から開閉できます。再起動後も確認できます
 - 会話単位の削除（共通モデル設定・使用量は保持）。ニュースの自動収集や会話からの長期意味記憶は含みません
 - Web Fetch: 既知URLのHTML記事・テキスト・Markdownを取得し、読みやすい本文へ変換（[制限・安全性・デプロイ](docs/web-fetch.md)）
+- ジョブ結果の通知: 設定からOS通知・未読バッジを有効化でき、通知のタップで該当会話へ移動（[挙動と制限](docs/sessions.md#os通知とアイコンのバッジ)）
 - リマインダー: `set_reminder`で1分〜30日後に同じ会話へ通知（アプリを閉じていても履歴に保存。OSプッシュ通知はありません）
 - 非同期Web Fetch: `web_fetch_async`で取得をQueueへ送り、Browser Run `/markdown`で変換後、会話の区切りで要約を追加（[設定・復旧・デプロイ](docs/async-fetch.md)）
 - kaniさんの記事: 記事Markdown取得・RSSの最新記事・タイトル部分一致検索（[使い方・デプロイ](docs/kani-tools.md)）
