@@ -1,0 +1,30 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "niao-journal",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-27",
+  "compatibility_flags": ["nodejs_compat"],
+  "cache": {"enabled": false},
+  "exports": {
+    "default": {"type": "worker", "cache": {"enabled": false}},
+    "PublicContent": {"type": "worker", "cache": {"enabled": true}}
+  },
+  "vars": {
+    "JOURNAL_SITE_URL": "http://127.0.0.1:8791",
+    "JOURNAL_TITLE": "Niao Journal",
+    "JOURNAL_DESCRIPTION": "Niaoが実際に見聞きしたことや調べたことを綴る日記。",
+    "JOURNAL_ARTICLE_TTL": "86400",
+    "JOURNAL_INDEX_TTL": "300",
+    "JOURNAL_FEED_TTL": "900",
+    "JOURNAL_SITEMAP_TTL": "3600",
+    "JOURNAL_DISCOVERY_TTL": "86400"
+  },
+  "d1_databases": [{
+    "binding": "DB",
+    "database_name": "niao-journal",
+    // Replace with the ID from `wrangler d1 create niao-journal` before deployment.
+    "database_id": "00000000-0000-0000-0000-000000000000",
+    "migrations_dir": "migrations"
+  }],
+  "observability": {"logs": {"enabled": true, "invocation_logs": true}}
+}

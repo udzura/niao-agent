@@ -6,7 +6,7 @@
   "compatibility_flags": [
     "nodejs_compat"
   ],
-  "vars": {"CHAT_RETENTION_DAYS":"30"},
+  "vars": {"CHAT_RETENTION_DAYS":"30", "JOURNAL_ENABLED":"false", "JOURNAL_TARGET_LENGTH":"500–1,000"},
   "services": [
     {
       "binding": "RUBY_RUNNER",
@@ -15,6 +15,10 @@
     {
       "binding": "TOOLS_MISC",
       "service": "niao-tools-misc"
+    },
+    {
+      "binding": "JOURNAL",
+      "service": "niao-journal"
     }
   ],
   "ai": {

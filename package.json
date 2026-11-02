@@ -5,12 +5,13 @@
     "apps/worker",
     "apps/ruby-runner",
     "apps/past-logs",
-    "apps/tools-misc"
+    "apps/tools-misc",
+    "apps/journal"
   ],
   "scripts": {
     "version:set": "node tools/set-version.mjs",
     "dev": "npm run dev -w apps/worker",
-    "test": "npm run test -w apps/past-logs && npm run test -w apps/worker",
+    "test": "npm run test -w apps/journal && npm run test -w apps/past-logs && npm run test -w apps/worker",
     "test:macos": "swift test --package-path apps/macos",
     "typecheck": "npm run typecheck --workspaces",
     "build:worker": "npm run build -w apps/worker",
@@ -19,6 +20,8 @@
     "build:runner": "npm run build -w apps/ruby-runner",
     "bench:ruby": "node tools/ruby-sandbox/bench.mjs",
     "dev:past-logs": "npm run dev -w apps/past-logs",
+    "dev:journal": "npm run dev -w apps/journal",
+    "build:journal": "npm run build -w apps/journal",
     "build:past-logs": "npm run build -w apps/past-logs",
     "build:tools": "npm run build -w apps/tools-misc",
     "build:ios": "bash apps/ios/scripts/build.sh",

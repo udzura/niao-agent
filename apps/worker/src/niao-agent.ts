@@ -14,6 +14,8 @@ import { withPastLogsTools, type AdditionalTool } from "./past-logs";
 import {asyncFetchTool,fetchJobMessage,fetchJobResult,jobLimits,type FetchJob,type FetchJobMessage,type FetchJobResult} from "./fetch-jobs";
 import {reminderTool} from "./reminder";
 import {validateWebUrl} from "../../tools-misc/src/web-resource";
+import {generateJournal, JournalJobs, journalToolCall, previousTokyoDate, redactJournalContext, type JournalArticle, type JournalRun} from "./journal";
+import {JournalError, journalLog, safeCode} from "../../journal/src/core/validation";
 
 type Active = { sessionId: string; requestId: string; text: string; thinking?: ThinkingSegment[] };
 const log = (event: string, fields: Record<string, unknown> = {}) => console.log(JSON.stringify({event, ...fields}));
@@ -93,6 +95,16 @@ export class NiaoAgent extends Agent<Env> {
     // require an explicit retry instead of silently charging for another generation.
     this.sql`UPDATE niao_turns SET status = 'failed', errorCode = 'interrupted', errorDetails = NULL WHERE status = 'running'`;
     this.migrateSessions();
+    this.journalJobs().initialize();
+    if (this.env.JOURNAL_ENABLED === "true" && this.env.JOURNAL && (this.env.JOURNAL_AGENT_TOKEN?.length ?? 0) >= 32) {
+      // Agents 0.31 cron schedules are UTC and idempotent by callback + payload.
+      await this.schedule("0 22 * * *", "dailyJournal", undefined, {idempotent: true});
+      await this.scheduleEvery(300, "maintainJournal");
+      this.journalJobs().catchUp();
+    } else {
+      for (const schedule of await this.listSchedules())
+        if (["dailyJournal", "maintainJournal"].includes(schedule.callback)) await this.cancelSchedule(schedule.id);
+    }
     await this.scheduleEvery(3600,"expireSessions");
     await this.expireSessions();
     this.deliverReminders();
@@ -111,6 +123,7 @@ export class NiaoAgent extends Agent<Env> {
 
   async onRequest(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname.includes("/journal")) return this.journalRequest(request);
     if (url.pathname.includes("/sessions")) return this.sessionRequest(request);
     if (url.pathname.endsWith("/settings")) {
       if (request.method === "GET") return this.json(this.settingsResponse());
@@ -215,6 +228,86 @@ export class NiaoAgent extends Agent<Env> {
     return new WorkersAIModel(this.env.AI, modelId, rubyExecutor(this.env.RUBY_RUNNER), thinkingEnabled, [...miscTools(this.env.TOOLS_MISC), ...tools]);
   }
   protected createThinkingJudge(): ThinkingJudge { return new ClefThinkingJudge(this.env.AI); }
+  protected createJournalArticle(date: string, context: string): Promise<JournalArticle> {
+    const attemptId = crypto.randomUUID();
+    this.sql`INSERT INTO niao_usage_attempts (id,startedAt) VALUES (${attemptId},${new Date().toISOString()})`;
+    const redacted = redactJournalContext(context, [this.env.NIAO_TOKEN, this.env.JOURNAL_AGENT_TOKEN, this.env.JOURNAL_PUBLISH_TOKEN,
+      this.env.PAST_LOGS_MCP_TOKEN, this.env.CF_ANALYTICS_TOKEN]);
+    return generateJournal(this.env.AI, date, redacted, this.env.JOURNAL_TARGET_LENGTH, neurons => {
+      this.sql`UPDATE niao_usage_attempts SET neurons=${validNeurons(neurons) ? neurons as number : null} WHERE id=${attemptId}`;
+    });
+  }
+  private journalJobs() {
+    return new JournalJobs({sql: (strings, ...values) => this.sql(strings, ...values),
+      generate: (date, context) => this.createJournalArticle(date, context),
+      create: input => journalToolCall(this.env, "create_draft", input), notify: run => this.notifyJournal(run)});
+  }
+  async dailyJournal() { await this.maintainJournal(); }
+  async maintainJournal() {
+    if (this.env.JOURNAL_ENABLED !== "true" || !this.env.JOURNAL || (this.env.JOURNAL_AGENT_TOKEN?.length ?? 0) < 32) return;
+    await this.journalJobs().maintain();
+  }
+  private notifyJournal(run: JournalRun) {
+    const sessionId = this.session(LEGACY_SESSION)?.id ?? this.sql<{id: string}>`SELECT id FROM niao_sessions ORDER BY lastActivityAt DESC LIMIT 1`[0]?.id;
+    if (!sessionId) return; // Receipt remains available through the authenticated journal endpoint.
+    const requestId = `journal:${run.date}`, text = `${run.date} のNiao Journalの下書きを作成しました。まだ公開していません。本文を確認してから公開できます。\n記事ID: ${run.articleId}\n確認: /journal/articles/${run.articleId}`;
+    const message = this.ctx.storage.transactionSync(() => {
+      this.sql`INSERT OR IGNORE INTO niao_turns (requestId,status,sessionId) VALUES (${requestId},'completed',${sessionId})`;
+      this.sql`INSERT OR IGNORE INTO niao_messages (id,requestId,role,content,createdAt,sessionId)
+        VALUES (${requestId},${requestId},'assistant',${text},${new Date().toISOString()},${sessionId})`;
+      return this.sql<Message>`SELECT * FROM niao_messages WHERE id=${requestId}`[0];
+    });
+    this.touchSession(sessionId);
+    this.publish({type: "message_added", sessionId, requestId, message});
+  }
+  private async journalRequest(request: Request) {
+    if (this.env.JOURNAL_ENABLED !== "true") return this.json({code: "journal_disabled"}, 503);
+    if (!this.env.JOURNAL || (this.env.JOURNAL_AGENT_TOKEN?.length ?? 0) < 32) return this.json({code: "journal_not_configured"}, 503);
+    const path = new URL(request.url).pathname.split("/journal")[1];
+    try {
+      if (!path && request.method === "GET") return this.json({runs: this.journalJobs().list()});
+      if (path === "/generate" && request.method === "POST") {
+        const body = await this.journalInput(request);
+        if (Object.keys(body).some(key => !["journalDate", "retryFailed"].includes(key)) || body.journalDate !== undefined && typeof body.journalDate !== "string" ||
+            body.retryFailed !== undefined && typeof body.retryFailed !== "boolean") throw new JournalError("invalid_input");
+        const run = this.journalJobs().enqueue(body.journalDate as string ?? previousTokyoDate(Date.now()), body.retryFailed === true);
+        await this.schedule(1, "maintainJournal", undefined, {idempotent: true});
+        return this.json({run}, 202);
+      }
+      if (path === "/articles" && request.method === "GET") {
+        const url = new URL(request.url);
+        return this.json(await journalToolCall(this.env, "list_articles", {page: Number(url.searchParams.get("page") ?? 1),
+          ...(url.searchParams.has("status") ? {status: url.searchParams.get("status")} : {})}));
+      }
+      const match = /^\/articles\/([a-f0-9-]{36})(\/publish)?$/.exec(path);
+      if (match && request.method === "GET" && !match[2]) return this.json(await journalToolCall(this.env, "get_article", {articleId: match[1]}));
+      if (match?.[2] && request.method === "POST") {
+        const body = await this.journalInput(request);
+        if (Object.keys(body).some(key => !["expectedUpdatedAt", "confirmPublication"].includes(key))) throw new JournalError("invalid_input");
+        return this.json(await journalToolCall(this.env, "publish_article", {...body, articleId: match[1]}, true));
+      }
+      return this.json({code: "not_found"}, 404);
+    } catch (error) {
+      const code = safeCode(error); journalLog("agent_request_error", {code});
+      return this.json({code}, error instanceof JournalError ? error.status : code === "invalid_input" ? 400 : 502);
+    }
+  }
+  private async journalInput(request: Request): Promise<Record<string, unknown>> {
+    if (!request.headers.get("Content-Type")?.startsWith("application/json")) throw new JournalError("invalid_input");
+    const reader = request.body?.getReader(); if (!reader) throw new JournalError("invalid_input");
+    let text = "", size = 0; const decoder = new TextDecoder();
+    try {
+      while (true) {
+        const {done, value} = await reader.read(); if (done) break;
+        size += value.byteLength; if (size > 2048) { await reader.cancel(); throw new JournalError("request_too_large", 413); }
+        text += decoder.decode(value, {stream: true});
+      }
+      const body = JSON.parse(text + decoder.decode());
+      if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error();
+      return body;
+    } catch (error) { if (error instanceof JournalError) throw error; throw new JournalError("invalid_input"); }
+    finally { reader.releaseLock(); }
+  }
   protected createNotificationModel(modelId:ModelID): ChatModel {
     // Background summaries cannot enqueue more work or invoke unrelated tools.
     return new WorkersAIModel(this.env.AI,modelId,undefined,false,[]);

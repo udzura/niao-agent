@@ -1,0 +1,30 @@
+{
+  "name": "@niao/journal",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --ip 127.0.0.1 --port 8791",
+    "build": "wrangler deploy --dry-run --outdir build",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "db:migrate": "wrangler d1 migrations apply DB --local"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "2.3.1",
+    "agents": "0.31.0",
+    "hono": "4.13.16",
+    "markdown-it": "15.0.3",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.4.8",
+    "@cloudflare/workers-types": "latest",
+    "@modelcontextprotocol/client": "2.3.1",
+    "@types/markdown-it": "14.2.0",
+    "fast-xml-parser": "^5.11.2",
+    "typescript": "latest",
+    "vitest": "~4.1.0",
+    "wrangler": "4.153.0"
+  }
+}

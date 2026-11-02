@@ -10,7 +10,7 @@ export default defineConfig({
     wrangler: { configPath: "./wrangler.jsonc" },
     remoteBindings: false,
     miniflare: {
-      d1Databases: {PAST_LOGS_TEST_DB: "past-logs-integration"},
+      d1Databases: {PAST_LOGS_TEST_DB: "past-logs-integration", JOURNAL_TEST_DB: "journal-integration"},
       workers: [{
         name: "niao-tools-misc", compatibilityDate: "2026-10-27", compatibilityFlags:["nodejs_compat"],
         serviceBindings: {BROWSER:"niao-browser-test-fixture"},
@@ -36,6 +36,13 @@ export default defineConfig({
         modulesRoot: fileURLToPath(new URL("../tools-misc/build/", import.meta.url)),
         modules: [{type:"ESModule",path:fileURLToPath(new URL("../tools-misc/build/index.js",import.meta.url))}],
       }, {
+        name: "niao-journal", compatibilityDate: "2026-10-27", compatibilityFlags: ["nodejs_compat"],
+        modulesRoot: fileURLToPath(new URL("../journal/build/", import.meta.url)),
+        modules: [{type: "ESModule", path: fileURLToPath(new URL("../journal/build/index.js", import.meta.url))}],
+        d1Databases: {DB: "journal-integration"},
+        bindings: {JOURNAL_SITE_URL: "https://journal.example.org", JOURNAL_AGENT_TOKEN: "journal-agent-token-0000000000000000000",
+          JOURNAL_PUBLISH_TOKEN: "journal-publisher-token-000000000000000"},
+      }, {
         name: "niao-browser-test-fixture", compatibilityDate: "2026-10-27",
         modules: [{type:"ESModule",path:fileURLToPath(new URL("./test/fixtures/browser-worker.mjs",import.meta.url))}],
       }, {
@@ -54,8 +61,11 @@ export default defineConfig({
           ...readdirSync(new URL("../ruby-runner/build/",import.meta.url)).filter(name=>name.endsWith(".wasm")).map(name=>({type:"CompiledWasm" as const,path:fileURLToPath(new URL(`../ruby-runner/build/${name}`,import.meta.url))})),
         ],
       }],
-      serviceBindings: {TOOLS_MISC:"niao-tools-misc", RUBY_RUNNER:"niao-ruby-runner", PAST_LOGS_TEST: "niao-past-logs"},
-      bindings: {TEST_PAST_LOGS_MIGRATIONS: await readD1Migrations("../past-logs/migrations"), NIAO_TOKEN: "test-only-token-000000000000000000000000", CF_ACCOUNT_ID: "", CF_ANALYTICS_TOKEN: ""}},
+      serviceBindings: {TOOLS_MISC:"niao-tools-misc", RUBY_RUNNER:"niao-ruby-runner", PAST_LOGS_TEST: "niao-past-logs", JOURNAL: "niao-journal"},
+      bindings: {TEST_PAST_LOGS_MIGRATIONS: await readD1Migrations("../past-logs/migrations"),
+        TEST_JOURNAL_MIGRATIONS: await readD1Migrations("../journal/migrations"),
+        JOURNAL_AGENT_TOKEN: "journal-agent-token-0000000000000000000", JOURNAL_PUBLISH_TOKEN: "journal-publisher-token-000000000000000",
+        NIAO_TOKEN: "test-only-token-000000000000000000000000", CF_ACCOUNT_ID: "", CF_ANALYTICS_TOKEN: ""}},
   })],
   test: {testTimeout: 15_000, hookTimeout: 15_000},
 });
