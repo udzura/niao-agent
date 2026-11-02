@@ -6,12 +6,13 @@
     "apps/ruby-runner",
     "apps/past-logs",
     "apps/tools-misc",
-    "apps/journal"
+    "apps/journal",
+    "apps/journal-agent"
   ],
   "scripts": {
     "version:set": "node tools/set-version.mjs",
     "dev": "npm run dev -w apps/worker",
-    "test": "npm run test -w apps/journal && npm run test -w apps/past-logs && npm run test -w apps/worker",
+    "test": "npm run test -w apps/journal-agent && npm run test -w apps/journal && npm run test -w apps/past-logs && npm run test -w apps/worker",
     "test:macos": "swift test --package-path apps/macos",
     "typecheck": "npm run typecheck --workspaces",
     "build:worker": "npm run build -w apps/worker",
@@ -25,7 +26,8 @@
     "build:past-logs": "npm run build -w apps/past-logs",
     "build:tools": "npm run build -w apps/tools-misc",
     "build:ios": "bash apps/ios/scripts/build.sh",
-    "test:ios": "bash apps/ios/scripts/test.sh"
+    "test:ios": "bash apps/ios/scripts/test.sh",
+    "build:journal-agent": "npm run build -w apps/journal-agent"
   },
   "devDependencies": {
     "esbuild": "0.28.1"

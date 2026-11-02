@@ -6,7 +6,7 @@
   "compatibility_flags": [
     "nodejs_compat"
   ],
-  "vars": {"CHAT_RETENTION_DAYS":"30", "JOURNAL_ENABLED":"false", "JOURNAL_TARGET_LENGTH":"500–1,000"},
+  "vars": {"CHAT_RETENTION_DAYS":"30"},
   "services": [
     {
       "binding": "RUBY_RUNNER",
@@ -15,10 +15,6 @@
     {
       "binding": "TOOLS_MISC",
       "service": "niao-tools-misc"
-    },
-    {
-      "binding": "JOURNAL",
-      "service": "niao-journal"
     }
   ],
   "ai": {
@@ -26,16 +22,17 @@
     "remote": true
   },
   "queues": {
-    "producers": [{"binding":"FETCH_JOBS","queue":"niao-fetch-jobs"}],
+    "producers": [{"binding":"FETCH_JOBS","queue":"niao-fetch-jobs"},{"binding":"JOURNAL_PROMPTS","queue":"niao-journal-prompts"}],
     "consumers": [{"queue":"niao-fetch-jobs","max_batch_size":1,"max_batch_timeout":1,
-      "max_concurrency":1,"max_retries":5,"dead_letter_queue":"niao-fetch-jobs-dlq"}]
+      "max_concurrency":1,"max_retries":5,"dead_letter_queue":"niao-fetch-jobs-dlq"},{"queue":"niao-journal-results","max_batch_size":1,"max_batch_timeout":1,"max_retries":10,"dead_letter_queue":"niao-journal-results-dlq"}]
   },
   "durable_objects": {
     "bindings": [
       {
         "name": "NiaoAgent",
         "class_name": "NiaoAgent"
-      }
+      },
+      {"name":"JournalAgent","class_name":"JournalAgent","script_name":"niao-journal-agent"}
     ]
   },
   "migrations": [

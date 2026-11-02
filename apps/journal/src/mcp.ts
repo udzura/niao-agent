@@ -20,9 +20,8 @@ export async function authorize(request: Request, env: JournalEnv): Promise<Auth
   if (agentMatches) return "agent";
   throw new JournalError("unauthorized", 401);
 }
-export async function boundedRequest(request: Request) {
+export async function boundedRequest(request: Request, max = 256 * 1024) {
   if (request.method !== "POST") return request;
-  const max = 256 * 1024;
   if (Number(request.headers.get("Content-Length") ?? "0") > max) throw new JournalError("request_too_large", 413);
   const reader = request.body?.getReader();
   if (!reader) throw new JournalError("invalid_input");

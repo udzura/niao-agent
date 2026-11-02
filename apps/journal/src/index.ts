@@ -2,6 +2,7 @@ import { WorkerEntrypoint } from "cloudflare:workers";
 import { JournalError, journalLog, safeCode } from "./core/validation";
 import { authorize, boundedRequest, journalMcp } from "./mcp";
 import { publicApp, securityHeaders, site, type JournalEnv } from "./public";
+import { reviewApp } from "./review";
 
 // This entrypoint must remain public-only: it has a platform cache BEFORE fetch.
 export class PublicContent extends WorkerEntrypoint<JournalEnv> {
@@ -45,9 +46,22 @@ const privateResponse = (response: Response) => {
   headers.delete("Cache-Tag");
   return new Response(response.body, {status: response.status, headers});
 };
+export function requireReviewAccess(env: JournalEnv, ctx: ExecutionContext) {
+  const aud = env.JOURNAL_REVIEW_ACCESS_AUD;
+  if (aud === undefined) return; // Opt in after creating the path-based Access app.
+  if (!aud.trim() || aud.length > 512) throw new JournalError("review_access_not_configured", 503);
+  // Runtime-provided Access context cannot be forged with incoming HTTP headers.
+  // Check at the gateway: Access context is not forwarded through Service Bindings.
+  if (!ctx.access || ctx.access.aud !== aud) throw new JournalError("review_access_required", 403);
+}
 export default {
   async fetch(request: Request, env: JournalEnv, ctx: ExecutionContext): Promise<Response> {
     try {
+      const path = new URL(request.url).pathname;
+      if (path === "/review" || path.startsWith("/review/")) {
+        requireReviewAccess(env, ctx);
+        return reviewApp.fetch(request, env, ctx);
+      }
       const content = (ctx.exports as unknown as {PublicContent: Service<PublicContent>}).PublicContent;
       if (new URL(request.url).pathname === "/mcp") {
         const role = await authorize(request, env);

@@ -5,7 +5,7 @@ macOS / iPhoneで使えるパーソナル AI コンパニオンの Phase 1。Swi
 - メインウィンドウ、メニューバーから開く・フォーカス、入力・送信、逐次表示、エラー・再試行
 - サーバーを正とする永続履歴、カーソル同期、送信 ID による重複防止
 - [複数会話の保持](docs/sessions.md): 会話一覧・切り替え・名前変更・アーカイブ・明示削除、最終活動から30日で自動削除
-- [Niao Journal](docs/journal.md): 独立したWorkerで日記の下書き・明示公開、HTML/Markdown・RSS配信（定期生成は初期設定で無効）
+- [Niao Journal](docs/journal.md): 独立したWorkerで日記の下書き・明示公開、HTML/Markdown・RSS配信。日報の作成・継続指示は[非同期の日報エージェント](docs/journal-agent.md)へ送信
 - HTTP と WebSocket upgrade の Bearer 認証、macOS Keychain 保存
 - 切断時の指数バックオフ、スリープ・復帰、20 秒ごとの履歴照合
 - モデル: Gemma 4（既定）/ GLM 4.7 Flash / Granite 4.0 H Micro / Llama 3.3 70B Fast / Llama 4 Scout 17B-16E / Qwen3 30B A3B FP8 / Qwen 3.8 27B を設定画面・APIから切り替え可能

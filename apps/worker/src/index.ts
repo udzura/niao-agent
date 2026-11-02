@@ -16,14 +16,16 @@ export interface Env {
   CF_ANALYTICS_TOKEN?: string;
   PAST_LOGS_MCP_URL?: string;
   PAST_LOGS_MCP_TOKEN?: string;
-  JOURNAL?: Fetcher;
-  JOURNAL_ENABLED?: string;
-  JOURNAL_AGENT_TOKEN?: string;
-  JOURNAL_PUBLISH_TOKEN?: string;
-  JOURNAL_TARGET_LENGTH?: string;
+  JOURNAL_PROMPTS?: Queue<import("./journal-agent-jobs").ReportEnvelope>;
+  JournalAgent?: DurableObjectNamespace<import("../../journal-agent/src/index").JournalAgent>;
+
 }
 export default {
-  queue: consumeFetchJobs,
+  async queue(batch:MessageBatch<unknown>,env:Env,ctx:ExecutionContext) {
+    if(batch.queue.startsWith("niao-journal-results")) {
+      const {consumeJournalResults}=await import("./journal-results"); await consumeJournalResults(batch,env);
+    } else await consumeFetchJobs(batch,env);
+  },
   async fetch(request: Request, env: Env): Promise<Response> {
     // Authenticate before routing, including upgrade requests and health checks.
     if (!env.NIAO_TOKEN || env.NIAO_TOKEN.length < 32) return new Response("Server is not configured", {status: 503});
@@ -32,9 +34,9 @@ export default {
     if (url.pathname === "/health" && request.method === "GET") return Response.json({ok: true, protocol: 1, version}, {headers: {"Cache-Control": "no-store"}});
     // One identity only; arbitrary URLs must not create additional billable agents.
     const sessionRoute=/^\/agents\/niao-agent\/personal\/sessions(?:\/[a-zA-Z0-9-]+(?:\/history)?)?$/.test(url.pathname);
-    const journalRoute=/^\/agents\/niao-agent\/personal\/journal(?:\/generate|\/articles(?:\/[a-f0-9-]{36}(?:\/publish)?)?)?$/.test(url.pathname);
-    if (!sessionRoute && !journalRoute && !["/agents/niao-agent/personal", "/agents/niao-agent/personal/history", "/agents/niao-agent/personal/usage", "/agents/niao-agent/personal/platform-usage", "/agents/niao-agent/personal/settings", "/agents/niao-agent/personal/jobs"].includes(url.pathname)) return new Response("Not found", {status: 404});
-    const allowed = journalRoute ? [url.pathname.endsWith("/generate") || url.pathname.endsWith("/publish") ? "POST" : "GET"] : sessionRoute ? ["GET","POST","PATCH","DELETE"] : url.pathname.endsWith("/settings") ? ["GET", "PUT"]
+
+    if (!sessionRoute && !["/agents/niao-agent/personal", "/agents/niao-agent/personal/history", "/agents/niao-agent/personal/usage", "/agents/niao-agent/personal/platform-usage", "/agents/niao-agent/personal/settings", "/agents/niao-agent/personal/jobs"].includes(url.pathname)) return new Response("Not found", {status: 404});
+    const allowed = sessionRoute ? ["GET","POST","PATCH","DELETE"] : url.pathname.endsWith("/settings") ? ["GET", "PUT"]
       : url.pathname.endsWith("/history") ? ["GET", "DELETE"] : ["GET"];
     if (!allowed.includes(request.method)) return new Response("Method not allowed", {status: 405, headers: {Allow: allowed.join(", ")}});
     const upgrade = request.headers.get("Upgrade")?.toLowerCase() === "websocket";

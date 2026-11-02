@@ -6,6 +6,7 @@ export interface Site {url: string; title: string; description: string}
 export const escape = (text: string) => text.replace(/[&<>"']/g, char => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"})[char]!);
 const xml = (text: string) => escape(text.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/g, ""));
 const md = new MarkdownIt({html: false, linkify: false, typographer: false});
+export const renderMarkdown = (body: string) => md.render(body);
 md.disable("image");
 const defaultLink = md.renderer.rules.link_open!;
 md.renderer.rules.link_open = (tokens, index, options, env, self) => {

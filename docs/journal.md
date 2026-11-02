@@ -38,7 +38,7 @@ printf '%s' '{"title":"D1について考えたこと","description":"資料を�
   | node apps/journal/scripts/mcp.mjs create_draft
 ```
 
-戻り値に `articleId`、`slug`、`updatedAt`、公開予定URLが含まれます。`public:false` のURLはまだ404です。下書き確認用の公開URLはありません。
+戻り値に `articleId`、`slug`、`updatedAt`、公開予定URLが含まれます。`public:false` のURLはまだ404です。下書きは認証付きのブラウザ画面またはMCPで確認できます。
 
 ```sh
 printf '%s' '{"articleId":"<articleId>"}' | node apps/journal/scripts/mcp.mjs get_article
@@ -55,6 +55,35 @@ printf '%s' '{"articleId":"<articleId>","expectedUpdatedAt":"<確認したupdate
 ```
 
 下書き用トークンでは公開できません。`publish_article` の再実行は記事も公開日時も増やしません。`cacheInvalidation:pending_retry` は保存・公開自体は成功し、パージは未完了であることを示します。同じ公開操作を再試行してください。ローカルにはWorkers Cacheがないためこの値になります。
+
+## ブラウザでの下書き確認
+
+Journalの `/review` を開きます。ローカルの場合は `http://127.0.0.1:8791/review` です。ログイン画面で `JOURNAL_AGENT_TOKEN` の値を入力すると、下書き一覧が表示されます。公開用トークンでも閲覧できますが、確認だけなら下書き用で十分です。新しいsecretやDBマイグレーションは不要です。
+
+記事を選ぶと、タイトル・説明・本文のHTMLプレビュー、公開される参考資料を確認できます。「Markdown原文」と「確認用のソース情報」を開くと原文や非公開の出典情報も確認できます。直接のプレビューURLは `/review/articles/<articleId>` です。
+
+この画面は閲覧専用です。修正はMCPのupdate_draft、公開は既存のMCP/APIから明示的に行います。メインの会話から[下書き提示・承認後公開](journal-agent.md)を利用することもできます。ブラウザで確認したupdatedAtを公開時のexpectedUpdatedAtに使ってください。
+
+トークンはURLへ含めず、ログインフォームから送信します。本番ではHTTPSの設定済みJOURNAL_SITE_URLを使ってください。ログイン後はトークンそのものを保存しない署名付きCookieを使い、1時間で期限切れになります。CookieにはHttpOnly・SameSite=Strict・HTTPS時のSecureを付けています。トークンを変更すると、そのトークンでログインした既存セッションも無効になります。ログアウトはブラウザのCookieを削除します。コピー済みセッションの即時失効が必要な場合はトークンを変更してください。
+
+プレビュー経路はcache無効のdefault entrypointで直接処理し、全応答をno-store/noindexとします。公開用entrypointやRSS・sitemapから下書きへ到達することはありません。生HTML・画像は公開ページと同じ設定で無効です。
+
+## `/review` だけをCloudflare Accessで保護する
+
+公開記事とMCPのURLは変更しません。Accessの対象は `/review` とその配下だけです。MCPの `/mcp` は引き続きBearer認証を使い、AgentからのService BindingにもAccess認証を要求しません。ブラウザはAccessログインに加えて、既存の下書き用トークンでも認証します。
+
+1. 実際のJournalドメインについて、Zero TrustのAccess Applicationsでパス指定のself-hosted applicationを作成します。Worker全体を保護する設定は使いません。
+2. 同じアプリの保護対象に `journal.example.com/review` と `journal.example.com/review/*` を含めます。`/review/*` だけでは親の `/review` が対象に入らないため、両方を指定します。Allow policyは確認する本人のメールアドレス等に限定してください。
+3. そのAccessアプリのApplication Audience (AUD)を取得し、JournalのWrangler varsに `JOURNAL_REVIEW_ACCESS_AUD` として設定します。AUDは秘密値ではありません。
+4. 許可されたデプロイ後、Access未認証のアクセスが遮断されることと、ログイン後に下書きを確認できることを確認します。`/journal`、`/feed.xml` は匿名で読め、`/mcp` はBearer認証のみで使えることも確認してください。
+
+AUD設定時は、Worker自身もruntimeの `ctx.access.aud` が一致することを確認します。未認証・別アプリのAUD・偽のAccess HTTPヘッダーは拒否します。チェックはcache無効のdefault entrypointで行います。Cloudflare AccessのcontextはService Bindingへ伝播しないため、公開用entrypointへの転送前に判定しています。
+
+現在のリポジトリには実際のAccessアプリのAUDを設定していません。**AUD未設定では既存トークン認証のみです。** 空文字のAUDは設定不備として拒否します。ローカルでAccessも検証する場合は、Wranglerの `access.dev` に同じaudを指定できます。このdev設定は本番のAccess policyを作成しません。
+
+ホスト名だけを保護するAccess設定は、別ホストのworkers.devやpreview URLまで保護しません。AUDチェックを残し、不要な公開経路は本番設定で `workers_dev:false` / `preview_urls:false` にするか別途保護してください。これらの実ドメイン設定・Accessアプリ作成・デプロイは、この実装では実行していません。
+
+公式資料: [WorkersとAccess](https://developers.cloudflare.com/workers/configuration/cloudflare-access/)、[Accessのパス指定](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/app-paths/)。
 
 ## データとMCP入力
 
@@ -94,38 +123,7 @@ RSSリーダーに `/feed.xml` のURLを登録できます。RSSのGUIDはslug�
 
 ## NiaoAgentとの接続
 
-Agent側には `JOURNAL` Service Bindingを追加済みです。Journal側と同じ `JOURNAL_AGENT_TOKEN` を `apps/worker/.dev.vars` またはWorker secretへ設定します。Agent HTTPから公開したい場合だけ、公開用 `JOURNAL_PUBLISH_TOKEN` もAgentに設定します。省略すればリモートMCPクライアントからだけ公開できます。
-
-`apps/worker/wrangler.jsonc` の `JOURNAL_ENABLED` は初期値falseです。trueへ変更すると、Agentが次に起動したときに毎日07:00 JSTの予定が登録されます。既存のpersonal Agentを一度HTTPで起動してください。登録にはAgents SDKの永続cron/intervalを使い、再起動で重複しません。無効化後は次の起動で予定を解除し、既存のalarm callbackも生成を行いません。
-
-既存の `npm run dev` はJournalも一緒に起動します。Journal単体を同時に二重起動しないでください。複数Worker開発時にWranglerの永続化ディレクトリを変えた場合は、そのD1に同じマイグレーションを適用してください。
-
-07:00に前日分を生成します。初回起動では直近の期限到来日だけを対象にし、その後の欠落は直近7日分まで補完します。5分ごとのmaintenanceが1件ずつ処理します。各日付について生成本文、試行回数、リース、次回試行時刻、記事IDをAgent SQLiteに保持し、最大5回で停止します。通信再試行は保存済み本文と `niao-journal:YYYY-MM-DD` のキーを使うため、生成済み本文の再推論や重複下書きを避けられます。推論中のクラッシュでは再推論が必要になり得ます。
-
-コンテキストは対象日の保存済みassistantメッセージ最大40件と背景fetch結果最大10件、計12,000文字以内です。userメッセージやthinkingは使いません。同期ツールの実行履歴は既存設計で永続化していないため収集しません。保存済み最終返答も個人情報を含み得ます。簡易的なマスクとプロンプトは人の確認の代わりにはなりません。日本語で500–1,000文字を目安に、1回の構造化生成を行います。目安は `JOURNAL_TARGET_LENGTH` で変更できます。公開用ツールはchat LLMに渡しません。
-
-下書き完成は通常のassistantメッセージとして保存・通知され、既存のMac/iOSクライアントでも履歴から確認できます。専用のネイティブ編集画面は未追加です。
-
-Agentの認証付きHTTPからも利用できます。`NIAO_TOKEN` を環境変数に設定し、backend URLを自分の環境に合わせてください。
-
-```sh
-export NIAO_URL=http://127.0.0.1:8787
-curl -H "Authorization: Bearer $NIAO_TOKEN" "$NIAO_URL/agents/niao-agent/personal/journal"
-curl -H "Authorization: Bearer $NIAO_TOKEN" -H 'Content-Type: application/json' \
-  -d '{}' "$NIAO_URL/agents/niao-agent/personal/journal/generate"
-curl -H "Authorization: Bearer $NIAO_TOKEN" "$NIAO_URL/agents/niao-agent/personal/journal/articles?status=draft"
-curl -H "Authorization: Bearer $NIAO_TOKEN" "$NIAO_URL/agents/niao-agent/personal/journal/articles/<articleId>"
-```
-
-手動生成は202で受理し、永続schedulerで処理します。任意の日を指定する場合は `{"journalDate":"YYYY-MM-DD"}` とし、過去30日以内の完了日を指定します。同じ日付の再実行は重複を作成しません。公開は全文を取得して確認した後、以下の明示的なPOSTで行います。
-
-5回失敗してstatusがfailedになった場合は、原因を解消してから同じgenerate endpointに `{"journalDate":"YYYY-MM-DD","retryFailed":true}` を送ると再試行できます。保存済み本文があれば再利用します。下書き作成が確認できた後はAgent内の本文コピーを消し、記事IDと処理状態を保持します。
-
-```sh
-curl -H "Authorization: Bearer $NIAO_TOKEN" -H 'Content-Type: application/json' \
-  -d '{"expectedUpdatedAt":"<確認したupdatedAt>","confirmPublication":true}' \
-  "$NIAO_URL/agents/niao-agent/personal/journal/articles/<articleId>/publish"
-```
+2026-11-03から、メインAgentの直接生成・MCP接続を専用の非同期日報エージェントへ移しました。新しい `ask_journal_agent`、12時間セッション、Queue・秘密値の移行は [日報エージェントの運用手順](journal-agent.md) を参照してください。旧Agent HTTPの生成・記事操作APIと07:00定期生成は廃止しました。
 
 ## キャッシュと無効化
 
@@ -158,8 +156,8 @@ CDNヒットではPublicContentの処理とD1読み取りを省略できます�
 3. Journalで `npx wrangler secret put JOURNAL_AGENT_TOKEN` と `npx wrangler secret put JOURNAL_PUBLISH_TOKEN` を設定する。少なくとも32文字、別の値を使う。
 4. Journalで `npx wrangler d1 migrations apply DB --remote` を実行する。
 5. 許可された時点で `npm run deploy -w @niao/journal` を実行する。D1と公開読取はAgentの稼働に依存しない。
-6. AgentのService Bindingが `niao-journal` を指すことを確認し、Agent側に同じ下書き用secretを設定する。必要な場合のみ公開用secretも設定する。
-7. AgentのJOURNAL_ENABLEDをtrueにし、許可された時点でAgentをデプロイする。最初の起動で予定を登録する。
+6. 専用の日報エージェントのService Bindingが `niao-journal` を指すことを確認し、専用Workerに下書き用secretを設定する。[新構成の移行手順](journal-agent.md)を参照。
+7. 新構成のQueueとDO bindingsを設定し、許可された時点で専用日報WorkerとメインWorkerを更新する。
 
 独立したD1以外にJournal用DO、Queue、Vectorize、Browser Runは必要ありません。Freeの低トラフィック運用を目指していますが、Worker/AI/D1の実際の使用量とプラン制限は確認してください。
 

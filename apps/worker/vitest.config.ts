@@ -10,8 +10,12 @@ export default defineConfig({
     wrangler: { configPath: "./wrangler.jsonc" },
     remoteBindings: false,
     miniflare: {
+      durableObjects: {JournalAgent: {className:"JournalAgent",scriptName:"niao-report-test-fixture"}},
       d1Databases: {PAST_LOGS_TEST_DB: "past-logs-integration", JOURNAL_TEST_DB: "journal-integration"},
-      workers: [{
+      workers: [{name:"niao-report-test-fixture",compatibilityDate:"2026-10-27",
+        modules:[{type:"ESModule",path:fileURLToPath(new URL("./test/fixtures/report-worker.mjs",import.meta.url))}],
+        durableObjects:{JournalAgent:{className:"JournalAgent",useSQLite:true}},
+      },{
         name: "niao-tools-misc", compatibilityDate: "2026-10-27", compatibilityFlags:["nodejs_compat"],
         serviceBindings: {BROWSER:"niao-browser-test-fixture"},
         // Only external HTTP and remote Browser Run are replaced: the actual production Worker and RPC run.
@@ -64,7 +68,7 @@ export default defineConfig({
       serviceBindings: {TOOLS_MISC:"niao-tools-misc", RUBY_RUNNER:"niao-ruby-runner", PAST_LOGS_TEST: "niao-past-logs", JOURNAL: "niao-journal"},
       bindings: {TEST_PAST_LOGS_MIGRATIONS: await readD1Migrations("../past-logs/migrations"),
         TEST_JOURNAL_MIGRATIONS: await readD1Migrations("../journal/migrations"),
-        JOURNAL_AGENT_TOKEN: "journal-agent-token-0000000000000000000", JOURNAL_PUBLISH_TOKEN: "journal-publisher-token-000000000000000",
+
         NIAO_TOKEN: "test-only-token-000000000000000000000000", CF_ACCOUNT_ID: "", CF_ANALYTICS_TOKEN: ""}},
   })],
   test: {testTimeout: 15_000, hookTimeout: 15_000},

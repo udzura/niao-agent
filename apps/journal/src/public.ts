@@ -8,6 +8,7 @@ export interface JournalEnv {
   JOURNAL_SITE_URL: string;
   JOURNAL_TITLE?: string; JOURNAL_DESCRIPTION?: string;
   JOURNAL_AGENT_TOKEN?: string; JOURNAL_PUBLISH_TOKEN?: string;
+  JOURNAL_REVIEW_ACCESS_AUD?: string;
   JOURNAL_ARTICLE_TTL?: string; JOURNAL_INDEX_TTL?: string; JOURNAL_FEED_TTL?: string;
   JOURNAL_SITEMAP_TTL?: string; JOURNAL_DISCOVERY_TTL?: string;
 }

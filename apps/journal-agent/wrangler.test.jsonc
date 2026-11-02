@@ -1,0 +1,9 @@
+{
+  "name":"niao-journal-agent-test",
+  "main":"test/entry.ts",
+  "compatibility_date":"2026-10-27",
+  "compatibility_flags":["nodejs_compat"],
+  "services":[{"binding":"JOURNAL","service":"niao-journal"}],
+  "durable_objects":{"bindings":[{"name":"JournalAgent","class_name":"JournalAgent"},{"name":"NiaoAgent","class_name":"NiaoAgent"}]},
+  "migrations":[{"tag":"v1","new_sqlite_classes":["JournalAgent","NiaoAgent"]}]
+}

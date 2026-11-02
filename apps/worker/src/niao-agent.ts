@@ -14,8 +14,8 @@ import { withPastLogsTools, type AdditionalTool } from "./past-logs";
 import {asyncFetchTool,fetchJobMessage,fetchJobResult,jobLimits,type FetchJob,type FetchJobMessage,type FetchJobResult} from "./fetch-jobs";
 import {reminderTool} from "./reminder";
 import {validateWebUrl} from "../../tools-misc/src/web-resource";
-import {generateJournal, JournalJobs, journalToolCall, previousTokyoDate, redactJournalContext, type JournalArticle, type JournalRun} from "./journal";
-import {JournalError, journalLog, safeCode} from "../../journal/src/core/validation";
+import {journalAgentTool,reportInput,reportLifetime,draftReview,isPublicationApproval,type DraftReview,type PublicationApproval,type ReportJob} from "./journal-agent-jobs";
+import {redactJournalContext} from "./journal";
 
 type Active = { sessionId: string; requestId: string; text: string; thinking?: ThinkingSegment[] };
 const log = (event: string, fields: Record<string, unknown> = {}) => console.log(JSON.stringify({event, ...fields}));
@@ -95,16 +95,14 @@ export class NiaoAgent extends Agent<Env> {
     // require an explicit retry instead of silently charging for another generation.
     this.sql`UPDATE niao_turns SET status = 'failed', errorCode = 'interrupted', errorDetails = NULL WHERE status = 'running'`;
     this.migrateSessions();
-    this.journalJobs().initialize();
-    if (this.env.JOURNAL_ENABLED === "true" && this.env.JOURNAL && (this.env.JOURNAL_AGENT_TOKEN?.length ?? 0) >= 32) {
-      // Agents 0.31 cron schedules are UTC and idempotent by callback + payload.
-      await this.schedule("0 22 * * *", "dailyJournal", undefined, {idempotent: true});
-      await this.scheduleEvery(300, "maintainJournal");
-      this.journalJobs().catchUp();
-    } else {
-      for (const schedule of await this.listSchedules())
-        if (["dailyJournal", "maintainJournal"].includes(schedule.callback)) await this.cancelSchedule(schedule.id);
-    }
+    this.sql`CREATE TABLE IF NOT EXISTS niao_report_sessions (id TEXT PRIMARY KEY,sessionId TEXT NOT NULL,epoch INTEGER NOT NULL,createdAt INTEGER NOT NULL,expiresAt INTEGER NOT NULL)`;
+    this.sql`CREATE TABLE IF NOT EXISTS niao_report_jobs (id TEXT PRIMARY KEY,sessionId TEXT NOT NULL,epoch INTEGER NOT NULL,requestId TEXT NOT NULL,prompt TEXT NOT NULL,reportSessionId TEXT NOT NULL,createdAt INTEGER NOT NULL,expiresAt INTEGER NOT NULL,status TEXT NOT NULL,dispatchedAt INTEGER NOT NULL DEFAULT 0,result TEXT, UNIQUE(sessionId,epoch,requestId,prompt))`;
+    if(!this.sql<{name:string}>`PRAGMA table_info(niao_report_jobs)`.some(c=>c.name==="approval"))this.sql`ALTER TABLE niao_report_jobs ADD COLUMN approval TEXT`;
+    this.sql`CREATE TABLE IF NOT EXISTS niao_report_reviews (sessionId TEXT PRIMARY KEY,epoch INTEGER NOT NULL,reportSessionId TEXT NOT NULL,articleId TEXT NOT NULL,updatedAt TEXT NOT NULL,reviewJobId TEXT NOT NULL,expiresAt INTEGER NOT NULL,approvedJobId TEXT)`;
+    for (const schedule of await this.listSchedules())
+      if (["dailyJournal","maintainJournal"].includes(schedule.callback)) await this.cancelSchedule(schedule.id);
+    if(this.env.JOURNAL_PROMPTS) for(const job of this.sql<{id:string}>`SELECT id FROM niao_report_jobs WHERE status NOT IN ('notified','cancelled')`)
+      await this.scheduleEvery(60,"maintainJournalAgentJobs",{jobId:job.id});
     await this.scheduleEvery(3600,"expireSessions");
     await this.expireSessions();
     this.deliverReminders();
@@ -123,7 +121,6 @@ export class NiaoAgent extends Agent<Env> {
 
   async onRequest(request: Request): Promise<Response> {
     const url = new URL(request.url);
-    if (url.pathname.includes("/journal")) return this.journalRequest(request);
     if (url.pathname.includes("/sessions")) return this.sessionRequest(request);
     if (url.pathname.endsWith("/settings")) {
       if (request.method === "GET") return this.json(this.settingsResponse());
@@ -228,85 +225,133 @@ export class NiaoAgent extends Agent<Env> {
     return new WorkersAIModel(this.env.AI, modelId, rubyExecutor(this.env.RUBY_RUNNER), thinkingEnabled, [...miscTools(this.env.TOOLS_MISC), ...tools]);
   }
   protected createThinkingJudge(): ThinkingJudge { return new ClefThinkingJudge(this.env.AI); }
-  protected createJournalArticle(date: string, context: string): Promise<JournalArticle> {
-    const attemptId = crypto.randomUUID();
-    this.sql`INSERT INTO niao_usage_attempts (id,startedAt) VALUES (${attemptId},${new Date().toISOString()})`;
-    const redacted = redactJournalContext(context, [this.env.NIAO_TOKEN, this.env.JOURNAL_AGENT_TOKEN, this.env.JOURNAL_PUBLISH_TOKEN,
-      this.env.PAST_LOGS_MCP_TOKEN, this.env.CF_ANALYTICS_TOKEN]);
-    return generateJournal(this.env.AI, date, redacted, this.env.JOURNAL_TARGET_LENGTH, neurons => {
-      this.sql`UPDATE niao_usage_attempts SET neurons=${validNeurons(neurons) ? neurons as number : null} WHERE id=${attemptId}`;
-    });
-  }
-  private journalJobs() {
-    return new JournalJobs({sql: (strings, ...values) => this.sql(strings, ...values),
-      generate: (date, context) => this.createJournalArticle(date, context),
-      create: input => journalToolCall(this.env, "create_draft", input), notify: run => this.notifyJournal(run)});
-  }
-  async dailyJournal() { await this.maintainJournal(); }
-  async maintainJournal() {
-    if (this.env.JOURNAL_ENABLED !== "true" || !this.env.JOURNAL || (this.env.JOURNAL_AGENT_TOKEN?.length ?? 0) < 32) return;
-    await this.journalJobs().maintain();
-  }
-  private notifyJournal(run: JournalRun) {
-    const sessionId = this.session(LEGACY_SESSION)?.id ?? this.sql<{id: string}>`SELECT id FROM niao_sessions ORDER BY lastActivityAt DESC LIMIT 1`[0]?.id;
-    if (!sessionId) return; // Receipt remains available through the authenticated journal endpoint.
-    const requestId = `journal:${run.date}`, text = `${run.date} のNiao Journalの下書きを作成しました。まだ公開していません。本文を確認してから公開できます。\n記事ID: ${run.articleId}\n確認: /journal/articles/${run.articleId}`;
-    const message = this.ctx.storage.transactionSync(() => {
-      this.sql`INSERT OR IGNORE INTO niao_turns (requestId,status,sessionId) VALUES (${requestId},'completed',${sessionId})`;
-      this.sql`INSERT OR IGNORE INTO niao_messages (id,requestId,role,content,createdAt,sessionId)
-        VALUES (${requestId},${requestId},'assistant',${text},${new Date().toISOString()},${sessionId})`;
-      return this.sql<Message>`SELECT * FROM niao_messages WHERE id=${requestId}`[0];
-    });
-    this.touchSession(sessionId);
-    this.publish({type: "message_added", sessionId, requestId, message});
-  }
-  private async journalRequest(request: Request) {
-    if (this.env.JOURNAL_ENABLED !== "true") return this.json({code: "journal_disabled"}, 503);
-    if (!this.env.JOURNAL || (this.env.JOURNAL_AGENT_TOKEN?.length ?? 0) < 32) return this.json({code: "journal_not_configured"}, 503);
-    const path = new URL(request.url).pathname.split("/journal")[1];
-    try {
-      if (!path && request.method === "GET") return this.json({runs: this.journalJobs().list()});
-      if (path === "/generate" && request.method === "POST") {
-        const body = await this.journalInput(request);
-        if (Object.keys(body).some(key => !["journalDate", "retryFailed"].includes(key)) || body.journalDate !== undefined && typeof body.journalDate !== "string" ||
-            body.retryFailed !== undefined && typeof body.retryFailed !== "boolean") throw new JournalError("invalid_input");
-        const run = this.journalJobs().enqueue(body.journalDate as string ?? previousTokyoDate(Date.now()), body.retryFailed === true);
-        await this.schedule(1, "maintainJournal", undefined, {idempotent: true});
-        return this.json({run}, 202);
-      }
-      if (path === "/articles" && request.method === "GET") {
-        const url = new URL(request.url);
-        return this.json(await journalToolCall(this.env, "list_articles", {page: Number(url.searchParams.get("page") ?? 1),
-          ...(url.searchParams.has("status") ? {status: url.searchParams.get("status")} : {})}));
-      }
-      const match = /^\/articles\/([a-f0-9-]{36})(\/publish)?$/.exec(path);
-      if (match && request.method === "GET" && !match[2]) return this.json(await journalToolCall(this.env, "get_article", {articleId: match[1]}));
-      if (match?.[2] && request.method === "POST") {
-        const body = await this.journalInput(request);
-        if (Object.keys(body).some(key => !["expectedUpdatedAt", "confirmPublication"].includes(key))) throw new JournalError("invalid_input");
-        return this.json(await journalToolCall(this.env, "publish_article", {...body, articleId: match[1]}, true));
-      }
-      return this.json({code: "not_found"}, 404);
-    } catch (error) {
-      const code = safeCode(error); journalLog("agent_request_error", {code});
-      return this.json({code}, error instanceof JournalError ? error.status : code === "invalid_input" ? 400 : 502);
+  async enqueueJournalAgent(input:unknown,requestId:string,epoch:number) {
+    const data=reportInput.parse(input),sessionId=this.active?.sessionId ?? LEGACY_SESSION;
+    if(!this.env.JOURNAL_PROMPTS)return {ok:false,error:"journal_agent_unavailable"};
+    if(this.active?.requestId!==requestId || this.session(sessionId)?.epoch!==epoch)return {ok:false,error:"history_changed"};
+    const duplicate=this.sql<ReportJob>`SELECT * FROM niao_report_jobs WHERE sessionId=${sessionId} AND epoch=${epoch} AND requestId=${requestId} AND prompt=${data.prompt}`[0];
+    if(duplicate)return duplicate.expiresAt<=Date.now() ? {ok:false,error:"report_session_expired"}
+      : {ok:true,jobId:duplicate.id,reportSessionId:duplicate.reportSessionId,expiresAt:new Date(duplicate.expiresAt).toISOString()};
+    if(this.sql<{n:number}>`SELECT COUNT(*) AS n FROM niao_report_jobs WHERE status NOT IN ('notified','cancelled')`[0].n>=10)return {ok:false,error:"journal_agent_job_limit"};
+    const id=crypto.randomUUID();
+    const recovery=await this.scheduleEvery(60,"maintainJournalAgentJobs",{jobId:id});
+    if(this.active?.requestId!==requestId || this.session(sessionId)?.epoch!==epoch){await this.cancelSchedule(recovery.id);return {ok:false,error:"history_changed"};}
+    const raced=this.sql<ReportJob>`SELECT * FROM niao_report_jobs WHERE sessionId=${sessionId} AND epoch=${epoch} AND requestId=${requestId} AND prompt=${data.prompt}`[0];
+    if(raced){await this.cancelSchedule(recovery.id);return {ok:true,jobId:raced.id,reportSessionId:raced.reportSessionId,expiresAt:new Date(raced.expiresAt).toISOString()};}
+    if(this.sql<{n:number}>`SELECT COUNT(*) AS n FROM niao_report_jobs WHERE status NOT IN ('notified','cancelled')`[0].n>=10){await this.cancelSchedule(recovery.id);return {ok:false,error:"journal_agent_job_limit"};}
+    const now=Date.now();
+    let report=data.reportSessionId ? this.sql<{id:string;expiresAt:number}>`SELECT * FROM niao_report_sessions WHERE id=${data.reportSessionId} AND sessionId=${sessionId} AND epoch=${epoch}`[0]
+      : this.sql<{id:string;expiresAt:number}>`SELECT * FROM niao_report_sessions WHERE sessionId=${sessionId} AND epoch=${epoch} AND expiresAt>${now} ORDER BY createdAt DESC LIMIT 1`[0];
+    if(data.reportSessionId && (!report || report.expiresAt<=now)){await this.cancelSchedule(recovery.id);return {ok:false,error:"report_session_expired"};}
+    if(!report){report={id:crypto.randomUUID(),expiresAt:now+reportLifetime};
+      this.sql`INSERT INTO niao_report_sessions VALUES (${report.id},${sessionId},${epoch},${now},${report.expiresAt})`;}
+    const review=this.sql<{articleId:string;updatedAt:string;reviewJobId:string}>`SELECT * FROM niao_report_reviews WHERE sessionId=${sessionId} AND epoch=${epoch} AND reportSessionId=${report.id} AND expiresAt>${now}`[0];
+    const user=this.sql<{content:string;seq:number}>`SELECT content,seq FROM niao_messages WHERE requestId=${requestId} AND sessionId=${sessionId} AND role='user'`[0];
+    const shown=review ? this.sql<{seq:number}>`SELECT seq FROM niao_messages WHERE id=${`journal-agent:${review.reviewJobId}`}`[0] : undefined;
+    const outstanding=this.sql`SELECT id FROM niao_report_jobs WHERE reportSessionId=${report.id} AND status NOT IN ('notified','cancelled') LIMIT 1`.length;
+    const approval=review && user && shown && user.seq>shown.seq && isPublicationApproval(user.content) && !outstanding
+      ? JSON.stringify({articleId:review.articleId,expectedUpdatedAt:review.updatedAt}) : null;
+    if(user && isPublicationApproval(user.content) && !approval){await this.cancelSchedule(recovery.id);return {ok:false,error:"draft_review_required"};}
+    if(!approval)this.sql`DELETE FROM niao_report_reviews WHERE sessionId=${sessionId}`;
+    this.sql`INSERT INTO niao_report_jobs(id,sessionId,epoch,requestId,prompt,reportSessionId,createdAt,expiresAt,status)
+      VALUES (${id},${sessionId},${epoch},${requestId},${data.prompt},${report.id},${now},${report.expiresAt},'pending')`;
+    if(approval){
+      this.sql`UPDATE niao_report_jobs SET approval=${approval} WHERE id=${id}`;
+      this.sql`UPDATE niao_report_reviews SET approvedJobId=${id} WHERE sessionId=${sessionId}`;
     }
+    this.publishJobs();await this.dispatchJournalAgentJob(id);
+    return {ok:true,jobId:id,reportSessionId:report.id,expiresAt:new Date(report.expiresAt).toISOString()};
   }
-  private async journalInput(request: Request): Promise<Record<string, unknown>> {
-    if (!request.headers.get("Content-Type")?.startsWith("application/json")) throw new JournalError("invalid_input");
-    const reader = request.body?.getReader(); if (!reader) throw new JournalError("invalid_input");
-    let text = "", size = 0; const decoder = new TextDecoder();
-    try {
-      while (true) {
-        const {done, value} = await reader.read(); if (done) break;
-        size += value.byteLength; if (size > 2048) { await reader.cancel(); throw new JournalError("request_too_large", 413); }
-        text += decoder.decode(value, {stream: true});
-      }
-      const body = JSON.parse(text + decoder.decode());
-      if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error();
-      return body;
-    } catch (error) { if (error instanceof JournalError) throw error; throw new JournalError("invalid_input"); }
-    finally { reader.releaseLock(); }
+  protected async sendJournalAgentJob(jobId:string){await this.env.JOURNAL_PROMPTS!.send({v:1,kind:"journal_agent",jobId});}
+  private async dispatchJournalAgentJob(id:string){
+    const job=this.sql<ReportJob>`SELECT * FROM niao_report_jobs WHERE id=${id}`[0];
+    if(!job || ["ready","notified","cancelled"].includes(job.status))return;
+    if(this.session(job.sessionId)?.epoch!==job.epoch){this.sql`UPDATE niao_report_jobs SET status='cancelled',prompt='' WHERE id=${id}`;return;}
+    if(job.expiresAt<=Date.now()){
+      this.sql`UPDATE niao_report_jobs SET status='ready',result='日報セッションの有効期限が切れました。新しいセッションを起動してください。' WHERE id=${id}`;return;
+    }
+    if(job.dispatchedAt>Date.now()-9*60000)return;
+    const now=Date.now();
+    this.sql`UPDATE niao_report_jobs SET status='queued',dispatchedAt=${now} WHERE id=${id}`;
+    try{await this.sendJournalAgentJob(id);}catch{this.sql`UPDATE niao_report_jobs SET status='pending',dispatchedAt=0 WHERE id=${id} AND dispatchedAt=${now}`;}
+  }
+  claimJournalAgentJob(id:string):{action:"skip"}|{action:"busy"}|{action:"run";job:ReportJob} {
+    const job=this.sql<ReportJob>`SELECT * FROM niao_report_jobs WHERE id=${id}`[0];
+    if(!job || ["ready","notified","cancelled"].includes(job.status) || this.session(job.sessionId)?.epoch!==job.epoch)return {action:"skip"};
+    if(job.status==='running' && job.dispatchedAt>Date.now()-8*60000)return {action:"busy"};
+    // Queue ordering is not guaranteed. Preserve prompt order within each report session.
+    const earlier=this.sql`SELECT id FROM niao_report_jobs WHERE reportSessionId=${job.reportSessionId} AND rowid<(SELECT rowid FROM niao_report_jobs WHERE id=${id}) AND status NOT IN ('ready','notified','cancelled') LIMIT 1`;
+    if(earlier.length)return {action:"busy"};
+    this.sql`UPDATE niao_report_jobs SET status='running',dispatchedAt=${Date.now()} WHERE id=${id}`;
+    this.publishJobs();return {action:"run",job};
+  }
+  journalChatSnapshot(jobId:string,afterSeq=0,limit=50){
+    const job=this.sql<ReportJob>`SELECT * FROM niao_report_jobs WHERE id=${jobId}`[0];
+    if(!job || job.status!=="running" || job.expiresAt<=Date.now() || this.session(job.sessionId)?.epoch!==job.epoch)throw Error("report_unavailable");
+    if(!Number.isSafeInteger(afterSeq)||afterSeq<0||!Number.isInteger(limit)||limit<1||limit>100)throw Error("invalid_cursor");
+    const date=new Date(Date.now()+9*3600000).toISOString().slice(0,10),start=new Date(`${date}T00:00:00+09:00`).toISOString(),end=new Date(Date.parse(start)+86400000).toISOString();
+    const rows=this.sql<{seq:number;sessionId:string;title:string;archivedAt:string|null;role:string;content:string;createdAt:string;contentChars:number}>`
+      SELECT m.seq,m.sessionId,s.title,s.archivedAt,m.role,substr(m.content,1,2000) AS content,length(m.content) AS contentChars,m.createdAt
+      FROM niao_messages m JOIN niao_sessions s ON s.id=m.sessionId
+      WHERE m.seq>${afterSeq} AND m.createdAt>=${start} AND m.createdAt<${end} ORDER BY m.seq LIMIT ${limit+1}`;
+    const selected=rows.slice(0,limit),rooms=new Map<string,{sessionId:string;title:string;archived:boolean;messages:{seq:number;role:string;content:string;createdAt:string}[]}>();
+    for(const row of selected){let room=rooms.get(row.sessionId);if(!room){room={sessionId:row.sessionId,title:row.title,archived:!!row.archivedAt,messages:[]};rooms.set(row.sessionId,room);}
+      room.messages.push({seq:row.seq,role:row.role,content:redactJournalContext(row.content,[this.env.NIAO_TOKEN,this.env.CF_ANALYTICS_TOKEN,this.env.PAST_LOGS_MCP_TOKEN]),createdAt:row.createdAt,...(row.contentChars>2000 ? {truncated:true,nextOffset:2000}: {})});}
+    for(const room of rooms.values())room.messages.sort((a,b)=>a.createdAt.localeCompare(b.createdAt)||a.seq-b.seq);
+    return {date,timeZone:"Asia/Tokyo",rooms:[...rooms.values()],nextAfterSeq:selected.at(-1)?.seq ?? afterSeq,hasMore:rows.length>limit,messageCharLimit:2000};
+  }
+  journalJobAlive(jobId:string){
+    const job=this.sql<ReportJob>`SELECT * FROM niao_report_jobs WHERE id=${jobId}`[0];
+    return !!job && job.status==="running" && job.expiresAt>Date.now() && this.session(job.sessionId)?.epoch===job.epoch;
+  }
+  journalChatMessage(jobId:string,seq:number,offset:number){
+    if(!this.journalJobAlive(jobId)||!Number.isSafeInteger(seq)||seq<1||!Number.isSafeInteger(offset)||offset<0)throw Error("report_unavailable");
+    const date=new Date(Date.now()+9*3600000).toISOString().slice(0,10),start=new Date(`${date}T00:00:00+09:00`).toISOString(),end=new Date(Date.parse(start)+86400000).toISOString();
+    const row=this.sql<{content:string;length:number;sessionId:string;role:string;createdAt:string}>`SELECT substr(content,${offset+1},2000) AS content,length(content) AS length,sessionId,role,createdAt FROM niao_messages WHERE seq=${seq} AND createdAt>=${start} AND createdAt<${end}`[0];
+    if(!row)throw Error("message_not_found");
+    return {...row,content:redactJournalContext(row.content,[this.env.NIAO_TOKEN,this.env.CF_ANALYTICS_TOKEN,this.env.PAST_LOGS_MCP_TOKEN]),nextOffset:offset+2000<row.length ? offset+2000 : null};
+  }
+  journalPublicationApproval(jobId:string):PublicationApproval|null {
+    if(!this.journalJobAlive(jobId))return null;
+    const job=this.sql<ReportJob>`SELECT * FROM niao_report_jobs WHERE id=${jobId}`[0];
+    const review=this.sql`SELECT articleId FROM niao_report_reviews WHERE sessionId=${job.sessionId} AND epoch=${job.epoch} AND reportSessionId=${job.reportSessionId} AND approvedJobId=${jobId} AND expiresAt>${Date.now()}`[0];
+    return review && job.approval ? JSON.parse(job.approval) : null;
+  }
+  async completeJournalAgentJob(id:string,reportSessionId:string,result:string,reviewInput:DraftReview|null=null){
+    const job=this.sql<ReportJob>`SELECT * FROM niao_report_jobs WHERE id=${id}`[0];
+    if(!job || job.reportSessionId!==reportSessionId || ["notified","cancelled"].includes(job.status) || this.session(job.sessionId)?.epoch!==job.epoch)return;
+    const review=reviewInput ? draftReview.parse(reviewInput) : null;
+    const text=review ? `${result.slice(0,16000)}\n\n---\n# 下書き: ${review.title}\n\n${review.description??""}\n\n${review.bodyMarkdown}\n\n${review.sources.length ? "参考資料:\n"+review.sources.map(s=>`- ${s.title??s.url}: ${s.url}`).join("\n") : ""}\n\n未公開です。この内容で公開する場合は「公開して」と返信してください。修正も依頼できます。\n記事ID: ${review.articleId}\n確認版: ${review.updatedAt}` : result.slice(0,16000);
+    this.ctx.storage.transactionSync(()=>{
+      if(review)this.sql`INSERT INTO niao_report_reviews VALUES (${job.sessionId},${job.epoch},${reportSessionId},${review.articleId},${review.updatedAt},${id},${job.expiresAt},NULL)
+        ON CONFLICT(sessionId) DO UPDATE SET epoch=excluded.epoch,reportSessionId=excluded.reportSessionId,articleId=excluded.articleId,updatedAt=excluded.updatedAt,reviewJobId=excluded.reviewJobId,expiresAt=excluded.expiresAt,approvedJobId=NULL`;
+      this.sql`UPDATE niao_report_jobs SET status='ready',result=${text} WHERE id=${id}`;
+    });
+    await this.deliverJournalAgentResults();
+  }
+  private async deliverJournalAgentResults(){
+    if(this.active)return;
+    for(const job of this.sql<ReportJob>`SELECT * FROM niao_report_jobs WHERE status='ready' ORDER BY createdAt,id`){
+      if(this.session(job.sessionId)?.epoch!==job.epoch){this.sql`UPDATE niao_report_jobs SET status='cancelled',result=NULL WHERE id=${job.id}`;continue;}
+      const requestId=`journal-agent:${job.id}`;
+      const message=this.ctx.storage.transactionSync(()=>{
+        this.sql`INSERT OR IGNORE INTO niao_turns(requestId,status,sessionId) VALUES (${requestId},'completed',${job.sessionId})`;
+        this.sql`INSERT OR IGNORE INTO niao_messages(id,requestId,role,content,createdAt,sessionId) VALUES (${requestId},${requestId},'assistant',${job.result??"日報処理が終了しました。"},${new Date().toISOString()},${job.sessionId})`;
+        this.sql`UPDATE niao_report_jobs SET status='notified' WHERE id=${job.id}`;
+        return this.sql<Message>`SELECT * FROM niao_messages WHERE id=${requestId}`[0];
+      });
+      this.touchSession(job.sessionId);this.publish({type:"message_added",sessionId:job.sessionId,requestId,message});
+    }
+    this.publishJobs();
+  }
+  async maintainJournalAgentJobs(payload?:{jobId:string},schedule?:{id:string}){
+    for(const job of this.sql<{id:string}>`SELECT id FROM niao_report_jobs WHERE status NOT IN ('notified','cancelled') LIMIT 10`)await this.dispatchJournalAgentJob(job.id);
+    await this.deliverJournalAgentResults();
+    this.sql`UPDATE niao_report_jobs SET prompt='' WHERE expiresAt<=${Date.now()} AND status IN ('notified','cancelled')`;
+    this.sql`DELETE FROM niao_report_sessions WHERE expiresAt<=${Date.now()}`;
+    if(payload && schedule){const job=this.sql<{status:string}>`SELECT status FROM niao_report_jobs WHERE id=${payload.jobId}`[0];
+      if(!job || ["notified","cancelled"].includes(job.status))await this.cancelSchedule(schedule.id);}
+
   }
   protected createNotificationModel(modelId:ModelID): ChatModel {
     // Background summaries cannot enqueue more work or invoke unrelated tools.
@@ -315,10 +360,12 @@ export class NiaoAgent extends Agent<Env> {
 
   private jobsSnapshot() {
     const fetches = this.sql<Pick<FetchJob,"id"|"url"|"status"|"notificationAttempts"|"sessionId">>`SELECT id,url,status,notificationAttempts,sessionId FROM niao_fetch_jobs WHERE status NOT IN ('notified','cancelled') ORDER BY createdAt,id`;
+    const reports = this.sql<ReportJob>`SELECT * FROM niao_report_jobs WHERE status NOT IN ('notified','cancelled') ORDER BY createdAt,id`;
     const reminders = this.sql<{id:string;message:string;dueAt:number;sessionId:string}>`SELECT id,message,dueAt,sessionId FROM niao_reminders WHERE status='pending' ORDER BY dueAt,id`;
     return {
       revision: this.sql<{revision:number}>`SELECT revision FROM niao_job_state WHERE id=1`[0].revision,
       items: [
+        ...reports.map(job=>({id:job.id,sessionId:job.sessionId,kind:"journal_agent",title:"日報エージェント",status:job.status})),
         ...fetches.map(job => ({
           id:job.id, sessionId:job.sessionId, kind:"web_fetch", title:new URL(job.url).hostname,
           status:this.active?.requestId === `notification:${job.id}` ? "notifying" :
@@ -666,7 +713,7 @@ export class NiaoAgent extends Agent<Env> {
         }
         controller.signal.throwIfAborted();
         attemptId = startAttempt();
-        const turnTools = [...tools,reminderTool((minutes,message)=>this.enqueueReminder(minutes,message,requestId,epoch)),
+        const turnTools = [...tools,...(this.env.JOURNAL_PROMPTS ? [journalAgentTool(input=>this.enqueueJournalAgent(input,requestId,epoch))] : []),reminderTool((minutes,message)=>this.enqueueReminder(minutes,message,requestId,epoch)),
           ...(this.env.FETCH_JOBS ? [asyncFetchTool(url=>this.enqueueFetchJob(url,requestId,epoch))] : [])];
         for await (const part of this.createModel(modelId, thinkingEnabled, turnTools).stream(boundedContext(recent), controller.signal)) {
           controller.signal.throwIfAborted();
@@ -826,6 +873,9 @@ export class NiaoAgent extends Agent<Env> {
     // Invalidate rows synchronously before awaiting schedule cancellation. Late RPC
     // completion cannot recreate jobs or deleted sessions.
     this.ctx.storage.transactionSync(()=>{
+      this.sql`UPDATE niao_report_jobs SET status='cancelled',prompt='',result=NULL WHERE sessionId=${id}`;
+      this.sql`DELETE FROM niao_report_sessions WHERE sessionId=${id}`;
+      this.sql`DELETE FROM niao_report_reviews WHERE sessionId=${id}`;
       this.sql`DELETE FROM niao_messages WHERE sessionId=${id}`;
       this.sql`DELETE FROM niao_thinking WHERE sessionId=${id}`;
       this.sql`DELETE FROM niao_turns WHERE sessionId=${id}`;
