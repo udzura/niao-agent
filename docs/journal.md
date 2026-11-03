@@ -97,7 +97,7 @@ AUD設定時は、Worker自身もruntimeの `ctx.access.aud` が一致するこ�
 {"sourceType":"url","sourceRef":"private-tracking-id","title":"D1 documentation","url":"https://developers.cloudflare.com/d1/","public":true}
 ```
 
-公開表現には明示的にpublicにしたURLとタイトルだけを出します。sourceRefは出しません。observation/messageソースは非公開です。公開ソースにはHTTPSの公開ホストのみを使い、秘密値らしいクエリ付きURLは拒否します。本文内の個人情報を完全に自動判定することはできないため、人の確認が必須です。
+公開表現には明示的にpublicにしたURLとタイトルだけを出します。sourceRefは出しません。observation/messageソースは非公開です。公開ソースにはHTTPSの公開ホストのみを使い、秘密値らしいクエリ付きURLは拒否します。本文内の個人情報を完全に自動判定することはできないため、公開前の人による確認を推奨します。明示的な公開指示があれば、AIからの委譲でも公開できます。
 
 ## 公開HTTPとRSS
 
@@ -139,11 +139,45 @@ gatewayはAcceptを解釈し、HTMLと`.md`で別の内部パスへ転送しま�
 | sitemap | 1時間 | JOURNAL_SITEMAP_TTL |
 | robots/llms | 24時間 | JOURNAL_DISCOVERY_TTL |
 
-ブラウザ側はmax-age=0として再検証を求め、CDNはs-maxageに従います。公開時はPublicContentのRPCから同entrypointの `ctx.cache.purge` を呼び、記事と一覧/feed/sitemapのtagをhard purgeします。失敗時は公開結果にpending_retryを返し、同じpublish操作で再試行できます。一覧/feedはTTLでも更新されます。
+ブラウザ側はmax-age=0として再検証を求め、CDNはs-maxageに従います。公開時はPublicContentのRPCから同entrypointの `ctx.cache.purge` を呼び、記事と一覧/feed/sitemapのtagをhard purgeします。失敗時は公開結果にpending_retryを返し、同じpublish操作で古いキャッシュの削除を再試行できます。公開世代も同時に進めるため、新しい公開内容の配信はpurge成功やTTLを待ちません。
 
-v1の公開済み記事はDBトリガーで更新・削除・取り下げを禁止しています。公開後の訂正APIはありません。緊急取り下げが必要な場合は、先に公開配信を停止し、全公開entrypointのhard purge成功と伝播を確認したうえで、DB制約を含む専用の移行を計画してください。SQLだけで状態を変えないでください。キャッシュを無効化するだけでは既存エントリは消えません。
+公開済み記事の本文更新はDBトリガーで禁止しています。削除だけはローカルの運用CLIから可能です。公開・削除と同時にD1の公開世代を更新します。gatewayは公開リクエストごとにprimaryからこの1行を読み、正規化済み内部URLへ `__journal_generation` を追加します。クライアントが指定した世代は引き継ぎません。古い記事・一覧・RSS・sitemapのキャッシュは参照されなくなるため、purgeの成否やTTLに依存せず、削除後に新しく受け付けるリクエストへ反映できます。D1が利用できない場合は503とし、古いキャッシュへフォールバックしません。
 
-CDNヒットではPublicContentの処理とD1読み取りを省略できます。gateway自体は毎回動きます。キャッシュヒットもWorkerリクエスト数に計上され、gatewayと内部fetchで追加リクエスト費用が生じ得ます。完全無料とは扱いません。
+CDNヒットではPublicContentでの本文取得・レンダリングを省略できますが、gatewayと公開世代のD1読み取り1回は毎回必要です。キャッシュキーにクエリを含める仕様は [Workers Cacheの公式資料](https://developers.cloudflare.com/workers/cache/cache-keys/) を参照してください。キャッシュヒットもWorkerリクエスト数に計上され、gatewayと内部fetchで追加リクエスト費用が生じ得ます。完全無料とは扱いません。
+
+## ローカルCLIから記事を削除する
+
+削除はJournal MCPやHTTP APIへ公開せず、手元のNode.jsスクリプトからWranglerのD1操作を実行します。必要な権限は運用者のCloudflareログイン（`npx wrangler login`）またはD1編集権限のあるCloudflare API tokenです。Journalの公開用・下書き用tokenでは削除できず、追加のJournal secretも不要です。以下はリポジトリのルートから実行します。`--remote` が本番D1、`--local` がWranglerのローカルD1です。
+
+まず対象の記事IDをMCPの `list_articles` / `get_article` または `/review` で確認し、削除対象の情報をプレビューします。この段階では書き込みません。
+
+```sh
+node apps/journal/scripts/delete-article.mjs --remote --article-id '<記事UUID>'
+```
+
+表示されたタイトル・status・updatedAtを確認し、そのupdatedAtを指定して削除します。
+
+```sh
+node apps/journal/scripts/delete-article.mjs --remote \
+  --article-id '<記事UUID>' \
+  --expected-updated-at '<表示されたupdatedAt>' \
+  --confirm
+```
+
+記事本文と紐づく出典を物理削除し、記事ID・確認版・削除日時だけを削除記録として残します。下書きも公開済み記事も対象です。確認後に更新されていた場合は削除せず失敗します。同じIDの削除を再実行した場合は削除済みと返します。通信結果が不明な場合は、まず同じIDでプレビューして状態を確認してください。
+
+`0002_local_deletion.sql` のトリガーが、削除記録の追加・確認版チェック・本文/出典の削除・公開世代更新を同じSQL操作で確定します。直接の公開記事DELETEや本文UPDATEは引き続き拒否します。CLIで削除後、HTML/Markdownが404となり、一覧・RSS・sitemapから除かれます。外部RSSリーダー等が既に保存したコピーやD1のバックアップは、この操作の対象外です。
+
+既存環境では、CLIを使う前に以下の順で更新してください。
+
+```sh
+npx wrangler d1 migrations apply DB --remote --config apps/journal/wrangler.jsonc
+npm run deploy -w @niao/journal
+npm run deploy -w @niao/journal-agent
+npm run deploy -w @niao/worker
+```
+
+旧Journal Workerのまま削除すると、キャッシュを参照しなくなる仕組みが有効になりません。先にマイグレーションとJournalのデプロイを完了してください。
 
 ローカルworkerdはWorkers Cacheとグローバルpurgeを実装していません。自動テストは分離された経路、表現別URL、no-store、MCPのパージ要求と失敗時応答を検証します。本番でのcache hit、CPU省略、purge伝播、対象アカウントでの利用可否は、許可されたデプロイ後に別途確認してください。
 
@@ -172,6 +206,6 @@ npm run build:worker
 
 テストはローカルD1、実際のMCP SDK・Service Binding・Agent SQLiteを使い、LLMだけを置き換えます。公開記事はローカルのテストデータです。生成のJST境界、重複予定、再起動、応答消失後の再送、試行上限、レビューと公開権限を含めて検証します。
 
-2026-11-02の実行結果: Journal 14件、Worker 309件、Past Logs 39件、importer 13件が成功しました。全workspaceの型チェック、Journal/AgentのWrangler dry-run、ローカルD1へのmigration、CLIからの下書き作成・確認・明示公開とHTTP配信も確認済みです。本番デプロイ、実際のAI推論、グローバルCDNの動作確認は行っていません。
+2026-11-03の実行結果: 日報Agent 17件、Journal 22件、削除CLI 2件、Worker 307件、Past Logs 39件、importer 13件の計400件が成功しました。全workspaceの型チェック、Journal/メイン/日報WorkerのWrangler dry-run、ローカルD1へのmigration、削除CLIのプレビュー・削除・削除済み再確認も確認済みです。本番デプロイ、実際のAI推論、グローバルCDNの動作確認は行っていません。
 
-共通のstorage/validation/renderは `apps/journal/src/core`、CloudflareとMCPはadapter、日記生成はAgent側です。OSSとして切り出す場合はcoreとadapterを先に取り出せる構成にしています。専用レビューUI、公開後の編集・撤回、履歴revision、自動公開、独立Observation基盤は今後の検討事項です。
+共通のstorage/validation/renderは `apps/journal/src/core`、CloudflareとMCPはadapter、日記生成はAgent側です。OSSとして切り出す場合はcoreとadapterを先に取り出せる構成にしています。公開後の本文編集、履歴revision、公開指示のない自動公開、独立Observation基盤は今後の検討事項です。

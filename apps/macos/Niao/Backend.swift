@@ -97,6 +97,21 @@ final class Backend {
         guard snapshot.v == 1 else { throw NiaoError.protocolMismatch }
         return snapshot
     }
+    private func journalUsagePath(target: JournalUsageTarget? = nil, before: Int? = nil) -> String {
+        var query = URLComponents()
+        query.queryItems = (target.map { [$0.queryItem] } ?? []) + (before.map { [URLQueryItem(name: "before", value: String($0))] } ?? [])
+        return "/agents/niao-agent/personal/journal-usage" + (query.percentEncodedQuery.flatMap { $0.isEmpty ? nil : "?" + $0 } ?? "")
+    }
+    func journalUsage(before: Int? = nil) async throws -> JournalUsagePage {
+        let page: JournalUsagePage = try await controlRequest(path: journalUsagePath(before: before), method: "GET")
+        guard page.v == 1, !page.hasMore || (page.nextCursor ?? 0) > 0 else { throw NiaoError.protocolMismatch }
+        return page
+    }
+    func journalUsage(target: JournalUsageTarget, before: Int? = nil) async throws -> JournalUsageDetail {
+        let page: JournalUsageDetail = try await controlRequest(path: journalUsagePath(target: target, before: before), method: "GET")
+        guard page.v == 1, target.matches(page), !page.hasMore || (page.nextCursor ?? 0) > 0 else { throw NiaoError.protocolMismatch }
+        return page
+    }
     func socket() -> URLSessionWebSocketTask {
         let task = session.webSocketTask(with: request(path: "/agents/niao-agent/personal?protocol=2", websocket: true))
         task.maximumMessageSize = 1_000_000

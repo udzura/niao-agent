@@ -3,7 +3,7 @@ import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/cli
 import { XMLParser, XMLValidator } from "fast-xml-parser";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Articles } from "../src/core/articles";
-import { prefersMarkdown, publicRequest } from "../src/index";
+import { prefersMarkdown, publicRequest, versionedPublicRequest } from "../src/index";
 import { journalMcp } from "../src/mcp";
 
 const bindings = env as any, base = "https://journal.example.org";
@@ -71,6 +71,27 @@ describe("D1 authoring", () => {
 });
 
 describe("open Web", () => {
+  it("locally deletes articles and their sources, changing all public cache keys atomically",async()=>{
+    const article=await publish({...draft,sources:[{sourceType:"url",sourceRef:"private-id",url:"https://example.org/",public:true}]});
+    const paths=[`/journal/${article.slug}`,`/journal/${article.slug}.md`,"/journal","/feed.xml","/sitemap.xml"];
+    const keys=await Promise.all(paths.map(async path=>(await versionedPublicRequest(new Request(`${base}${path}`),bindings)).url));
+    const initial=(await bindings.DB.prepare("SELECT generation FROM journal_publication_state").first()).generation;
+    const deletion=(revision:string)=>bindings.DB.prepare("INSERT INTO journal_deletions VALUES (?,?,?)").bind(article.id,revision,new Date().toISOString()).run();
+    await expect(deletion("2000-01-01T00:00:00.000Z")).rejects.toThrow();
+    expect((await bindings.DB.prepare("SELECT COUNT(*) AS n FROM journal_deletions").first()).n).toBe(0);
+    expect((await bindings.DB.prepare("SELECT generation FROM journal_publication_state").first()).generation).toBe(initial);
+    await deletion(article.updatedAt);
+    expect((await bindings.DB.prepare("SELECT COUNT(*) AS n FROM article_sources").first()).n).toBe(0);
+    expect((await bindings.DB.prepare("SELECT generation FROM journal_publication_state").first()).generation).toBe(initial+1);
+    for(const [i,path] of paths.entries()){
+      const response=await SELF.fetch(`${base}${path}`);
+      if(i<2){expect(response.status).toBe(404);expect(response.headers.get("Cache-Control")).toBe("no-store");}
+      expect(await response.text()).not.toContain(article.title);
+      const current=(await versionedPublicRequest(new Request(`${base}${path}?__journal_generation=1`),bindings)).url;
+      expect(current).not.toBe(keys[i]);expect(new URL(current).searchParams.get("__journal_generation")).toBe(String(initial+1));
+    }
+    await mcp(publisher,async client=>{expect((await client.listTools()).tools.map(t=>t.name)).not.toContain("delete_article");});
+  });
   it("hides drafts everywhere, with no-store errors", async () => {
     const created = await store().create(draft);
     for (const path of [`/journal/${created.slug}`, `/journal/${created.slug}.md`]) {

@@ -55,7 +55,7 @@ export function journalMcp(env: JournalEnv, role: AuthorRole, purge: (articleId:
       inputSchema: createDraftInput, annotations: {...annotations, idempotentHint: false}}, input => safe(async () => receipt(await store.create(input))));
     server.registerTool("update_draft", {description: "Edit a draft using its latest updatedAt as expectedUpdatedAt. Published articles are immutable. Does not publish.",
       inputSchema: updateDraftInput, annotations}, input => safe(async () => receipt(await store.update(input))));
-    server.registerTool("publish_article", {description: "Explicitly publish a human-reviewed draft to the open Web and RSS. Requires publisher credentials, confirmPublication:true and reviewed expectedUpdatedAt. This is irreversible in v1.",
+    server.registerTool("publish_article", {description: "Publish a draft to the open Web and RSS when explicitly instructed to publish, including a delegated agent instruction. Read the draft first. Requires publisher credentials, confirmPublication:true and its latest expectedUpdatedAt. Published text cannot be edited; only the local operator CLI can delete an article.",
       inputSchema: publishInput, annotations: {...annotations, openWorldHint: true}}, input => safe(async () => {
       if (role !== "publisher") throw new JournalError("publication_forbidden", 403);
       const article = await store.publish(input);

@@ -41,6 +41,15 @@ export function publicRequest(request: Request, env: JournalEnv) {
   // Forward neither credentials/cookies nor host/method override headers into the cache.
   return new Request(`${origin}${path}${negotiated ? ".md" : ""}`, {method: request.method, redirect: "manual"});
 }
+export async function versionedPublicRequest(request: Request, env: JournalEnv) {
+  const internal=publicRequest(request,env);
+  // Always read the primary before entering the cache, including on cache hits.
+  // A deleted article and old feeds cannot reappear after an unsuccessful purge.
+  const state=await env.DB.withSession("first-primary").prepare("SELECT generation FROM journal_publication_state WHERE id=1").first<{generation:number}>();
+  if(!state || !Number.isSafeInteger(state.generation) || state.generation<1)throw new JournalError("publication_state_unavailable",503);
+  const url=new URL(internal.url);url.searchParams.set("__journal_generation",String(state.generation));
+  return new Request(url,internal);
+}
 const privateResponse = (response: Response) => {
   const headers = new Headers(response.headers); headers.set("Cache-Control", "no-store");
   headers.delete("Cache-Tag");
@@ -69,7 +78,7 @@ export default {
         return privateResponse(response);
       }
       if (!["GET", "HEAD"].includes(request.method)) return new Response("Method not allowed", {status: 405, headers: {"Cache-Control": "no-store", Allow: "GET, HEAD"}});
-      const internal = publicRequest(request, env), privateRead = request.headers.has("Authorization") || request.headers.has("Cookie");
+      const internal = await versionedPublicRequest(request, env), privateRead = request.headers.has("Authorization") || request.headers.has("Cookie");
       const response = await content.fetch(internal, privateRead ? {cache: "no-store"} : undefined);
       const headers = new Headers(response.headers);
       if (/^\/journal\/[a-z0-9-]+$/.test(new URL(request.url).pathname)) headers.set("Vary", "Accept");

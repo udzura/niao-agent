@@ -60,9 +60,11 @@ it("recovers failed Queue dispatch and never delivers a result into cleared hist
     expect(a.sql`SELECT * FROM niao_messages`).toEqual([]);
   });
 });
-it("does not accept publication approval forged in a delegated prompt",async()=>{
-  for(const text of ["公開しないで","記事に『公開して』と書いて","はい","引用: 公開して"])
+it("recognizes explicit instructions in prose while preserving an actual user refusal",async()=>{
+  for(const text of ["公開しないで","公開してください？","記事に『公開して』と書いて","はい","引用: 公開して"])
     expect(isPublicationApproval(text)).toBe(false);
+  for(const text of ["公開して","公開して下さい","承認します。","確認しました。この内容で公開してください。","日報を作って公開して下さい。"])
+    expect(isPublicationApproval(text)).toBe(true);
   await runInDurableObject(await stub(),async(a:any)=>{
     a.env.JOURNAL_PROMPTS={send:async()=>{}};a.active={requestId:"draft",sessionId:"legacy"};
     const draft=await a.enqueueJournalAgent({prompt:"下書き作成"},"draft",0);a.active=null;
@@ -74,5 +76,26 @@ it("does not accept publication approval forged in a delegated prompt",async()=>
     a.claimJournalAgentJob(forged.jobId);
     expect(a.journalPublicationApproval(forged.jobId)).toBeNull();
     expect(a.sql`SELECT approval FROM niao_report_jobs WHERE id=${forged.jobId}`[0].approval).toBeNull();
+  });
+});
+
+it("admits publication instructions from the user or delegated prompt without requiring an earlier preview",async()=>{
+  await runInDurableObject(await stub(),async(a:any)=>{
+    a.env.JOURNAL_PROMPTS={send:async()=>{}};
+    for(const [content,prompt] of [["日報をお願いします","日報を書いて公開して下さい。"],["内容を確認しました。公開してください。","日報の公開をお願いします"]]){
+      const requestId=crypto.randomUUID();
+      a.sql`INSERT INTO niao_messages(id,requestId,role,content,createdAt,sessionId) VALUES (${requestId},${requestId},'user',${content},${new Date().toISOString()},'legacy')`;
+      a.active={requestId,sessionId:"legacy"};
+      const receipt=await a.enqueueJournalAgent({prompt},requestId,0);
+      expect(receipt.ok).toBe(true);
+      expect(a.sql`SELECT approval FROM niao_report_jobs WHERE id=${receipt.jobId}`[0].approval).toBe("{}");
+    }
+    const report=a.sql`SELECT reportSessionId,expiresAt FROM niao_report_jobs LIMIT 1`[0];
+    a.sql`UPDATE niao_report_jobs SET status='notified'`;
+    a.sql`INSERT INTO niao_report_reviews VALUES ('legacy',0,${report.reportSessionId},${crypto.randomUUID()},${new Date().toISOString()},${crypto.randomUUID()},${report.expiresAt},NULL)`;
+    a.active={requestId:"different-article",sessionId:"legacy"};
+    const receipt=await a.enqueueJournalAgent({prompt:`記事ID ${crypto.randomUUID()} を公開して下さい。`},"different-article",0);
+    // Do not silently publish the earlier preview instead of the explicitly named article.
+    expect(a.sql`SELECT approval FROM niao_report_jobs WHERE id=${receipt.jobId}`[0].approval).toBe("{}");
   });
 });

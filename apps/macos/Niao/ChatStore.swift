@@ -54,6 +54,16 @@ final class ChatStore: ObservableObject {
     @Published var platformUsageError: String?
     @Published var platformUsageLoading = false
     private var platformUsageTask: Task<Void, Never>?
+    @Published var journalUsage: JournalUsagePage?
+    @Published var journalUsageError: String?
+    @Published var journalUsageLoading = false
+    @Published private(set) var journalUsageTarget: JournalUsageTarget?
+    @Published var journalUsageDetail: JournalUsageDetail?
+    @Published var journalUsageDetailError: String?
+    @Published var journalUsageDetailLoading = false
+    private var journalUsageTask: Task<Void, Never>?
+    private var journalUsageDetailTask: Task<Void, Never>?
+    private var journalUsageDetailRevision = UUID()
     private var backend: Backend?
     private var usageRefreshAt: Date?
     @Published var draft = ""
@@ -140,6 +150,8 @@ final class ChatStore: ObservableObject {
         toolToast.clear()
         usage = nil; usageError = nil; usageRefreshAt = nil
         platformUsage = nil; platformUsageError = nil
+        journalUsage = nil; journalUsageError = nil
+        closeJournalUsageDetail()
         reconnect()
     }
     func start() { systemNotifications.refresh(); if loop == nil { reconnect() } }
@@ -155,6 +167,9 @@ final class ChatStore: ObservableObject {
         runningToolName = nil
         usageTask?.cancel(); usageTask = nil; usageLoading = false
         platformUsageTask?.cancel(); platformUsageTask = nil; platformUsageLoading = false
+        journalUsageTask?.cancel(); journalUsageTask = nil; journalUsageLoading = false
+        journalUsageDetailTask?.cancel(); journalUsageDetailTask = nil; journalUsageDetailLoading = false
+        journalUsageDetailRevision = UUID()
         backend = nil
         loop?.cancel(); loop = nil
         heartbeat?.cancel(); heartbeat = nil
@@ -660,6 +675,66 @@ final class ChatStore: ObservableObject {
                 } else { platformUsageError = "Workersの使用量を更新できませんでした。" }
             }
         }
+    }
+    func refreshJournalUsage(more: Bool = false) {
+        guard journalUsageTask == nil, let backend else { return }
+        let before = more ? journalUsage?.nextCursor : nil
+        if more && (journalUsage?.hasMore != true || before == nil) { return }
+        let id = generation
+        journalUsageLoading = true
+        journalUsageTask = Task { [weak self] in
+            guard let self else { return }
+            defer { if generation == id { journalUsageTask = nil; journalUsageLoading = false } }
+            do {
+                let page = try await backend.journalUsage(before: before)
+                guard generation == id, !Task.isCancelled else { return }
+                journalUsage = more ? journalUsage?.appending(page) ?? page : page
+                journalUsageError = nil
+            } catch {
+                guard generation == id, !Task.isCancelled else { return }
+                journalUsageError = journalUsageErrorMessage(error)
+            }
+        }
+    }
+    func showJournalUsage(_ target: JournalUsageTarget) {
+        guard connected else { return }
+        if journalUsageTarget != target { closeJournalUsageDetail(); journalUsageTarget = target }
+        refreshJournalUsageDetail()
+    }
+    func closeJournalUsageDetail() {
+        journalUsageDetailTask?.cancel(); journalUsageDetailTask = nil
+        journalUsageDetailRevision = UUID()
+        journalUsageTarget = nil; journalUsageDetail = nil; journalUsageDetailError = nil; journalUsageDetailLoading = false
+    }
+    func refreshJournalUsageDetail(more: Bool = false) {
+        guard journalUsageDetailTask == nil, let backend, let target = journalUsageTarget else { return }
+        let before = more ? journalUsageDetail?.nextCursor : nil
+        if more && (journalUsageDetail?.hasMore != true || before == nil) { return }
+        let id = generation, revision = journalUsageDetailRevision
+        journalUsageDetailLoading = true
+        journalUsageDetailTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if generation == id && journalUsageDetailRevision == revision {
+                    journalUsageDetailTask = nil; journalUsageDetailLoading = false
+                }
+            }
+            do {
+                let page = try await backend.journalUsage(target: target, before: before)
+                guard generation == id, journalUsageDetailRevision == revision, !Task.isCancelled else { return }
+                if more, let current = journalUsageDetail { journalUsageDetail = try current.appending(page) }
+                else { journalUsageDetail = page }
+                journalUsageDetailError = nil
+            } catch {
+                guard generation == id, journalUsageDetailRevision == revision, !Task.isCancelled else { return }
+                journalUsageDetailError = journalUsageErrorMessage(error)
+            }
+        }
+    }
+    private func journalUsageErrorMessage(_ error: Error) -> String {
+        if case NiaoError.http(404) = error { return "日報統計を取得できません。使用量APIのデプロイと対象の記録を確認してください。" }
+        if case NiaoError.unauthorized = error { return "日報統計の認証に失敗しました。接続設定を確認してください。" }
+        return "日報の使用量を更新できませんでした。もう一度「更新」を押してください。"
     }
     func send() {
         guard canSend else { return }

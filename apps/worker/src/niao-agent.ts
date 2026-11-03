@@ -1,7 +1,7 @@
 import {LEGACY_SESSION, sessionLimits, type ChatSession} from "./sessions";
 import {version} from "../../../version.json";
 import { rubyExecutor } from "./ruby/tool";
-import { Agent, type Connection, type ConnectionContext, type WSMessage } from "agents";
+import { Agent, getAgentByName, type Connection, type ConnectionContext, type WSMessage } from "agents";
 import type { Env } from "./index";
 import { boundedContext, DEFAULT_MODEL, MODELS, isModelID, supportsThinking, type ModelID, WorkersAIModel, type ChatModel, type ModelMessage } from "./model";
 import { ChatError, errorCode, parseSubmission, type Message, type Turn, type ThinkingSegment } from "./protocol";
@@ -14,7 +14,7 @@ import { withPastLogsTools, type AdditionalTool } from "./past-logs";
 import {asyncFetchTool,fetchJobMessage,fetchJobResult,jobLimits,type FetchJob,type FetchJobMessage,type FetchJobResult} from "./fetch-jobs";
 import {reminderTool} from "./reminder";
 import {validateWebUrl} from "../../tools-misc/src/web-resource";
-import {journalAgentTool,reportInput,reportLifetime,draftReview,isPublicationApproval,type DraftReview,type PublicationApproval,type ReportJob} from "./journal-agent-jobs";
+import {journalAgentTool,reportInput,reportUsageQuery,reportLifetime,draftReview,isPublicationApproval,isPublicationDenial,type DraftReview,type PublicationApproval,type ReportJob} from "./journal-agent-jobs";
 import {redactJournalContext} from "./journal";
 
 type Active = { sessionId: string; requestId: string; text: string; thinking?: ThinkingSegment[] };
@@ -96,7 +96,12 @@ export class NiaoAgent extends Agent<Env> {
     this.sql`UPDATE niao_turns SET status = 'failed', errorCode = 'interrupted', errorDetails = NULL WHERE status = 'running'`;
     this.migrateSessions();
     this.sql`CREATE TABLE IF NOT EXISTS niao_report_sessions (id TEXT PRIMARY KEY,sessionId TEXT NOT NULL,epoch INTEGER NOT NULL,createdAt INTEGER NOT NULL,expiresAt INTEGER NOT NULL)`;
+    // Keep a content-free usage index after the source chat/context is removed.
+    this.sql`CREATE TABLE IF NOT EXISTS niao_report_usage_sessions (id TEXT PRIMARY KEY,createdAt INTEGER NOT NULL,expiresAt INTEGER NOT NULL)`;
+    this.sql`INSERT OR IGNORE INTO niao_report_usage_sessions SELECT id,createdAt,expiresAt FROM niao_report_sessions`;
     this.sql`CREATE TABLE IF NOT EXISTS niao_report_jobs (id TEXT PRIMARY KEY,sessionId TEXT NOT NULL,epoch INTEGER NOT NULL,requestId TEXT NOT NULL,prompt TEXT NOT NULL,reportSessionId TEXT NOT NULL,createdAt INTEGER NOT NULL,expiresAt INTEGER NOT NULL,status TEXT NOT NULL,dispatchedAt INTEGER NOT NULL DEFAULT 0,result TEXT, UNIQUE(sessionId,epoch,requestId,prompt))`;
+    this.sql`INSERT OR IGNORE INTO niao_report_usage_sessions
+      SELECT reportSessionId,MIN(createdAt),MAX(expiresAt) FROM niao_report_jobs GROUP BY reportSessionId`;
     if(!this.sql<{name:string}>`PRAGMA table_info(niao_report_jobs)`.some(c=>c.name==="approval"))this.sql`ALTER TABLE niao_report_jobs ADD COLUMN approval TEXT`;
     this.sql`CREATE TABLE IF NOT EXISTS niao_report_reviews (sessionId TEXT PRIMARY KEY,epoch INTEGER NOT NULL,reportSessionId TEXT NOT NULL,articleId TEXT NOT NULL,updatedAt TEXT NOT NULL,reviewJobId TEXT NOT NULL,expiresAt INTEGER NOT NULL,approvedJobId TEXT)`;
     for (const schedule of await this.listSchedules())
@@ -163,6 +168,7 @@ export class NiaoAgent extends Agent<Env> {
     }
     if (request.method !== "GET") return this.json({code: "method_not_allowed"}, 405);
     if (url.pathname.endsWith("/jobs")) return this.json({v:1,epoch:this.settings().epoch,jobs:{...this.jobsSnapshot(),items:this.jobsSnapshot().items.filter(job=>job.sessionId===LEGACY_SESSION).map(({sessionId,...job})=>job)}});
+    if (url.pathname.endsWith("/journal-usage")) return this.journalUsageResponse(url);
     if (url.pathname.endsWith("/usage")) return this.usageResponse();
     if (url.pathname.endsWith("/platform-usage")) {
       let snapshot = await this.platformAnalytics.today();
@@ -183,6 +189,41 @@ export class NiaoAgent extends Agent<Env> {
     }, {headers: {"Cache-Control": "no-store"}});
   }
 
+  private async journalUsageResponse(url:URL):Promise<Response>{
+    const parsed=reportUsageQuery.safeParse(Object.fromEntries(url.searchParams));
+    if(!parsed.success)return this.json({code:"invalid_journal_usage_query"},400);
+    const namespace=this.env.JournalAgent;
+    if(!namespace)return this.json({code:"journal_agent_unavailable"},503);
+    const {jobId,before,limit}=parsed.data;
+    let reportSessionId=parsed.data.reportSessionId;
+    if(jobId){
+      reportSessionId=this.sql<{reportSessionId:string}>`SELECT reportSessionId FROM niao_report_jobs WHERE id=${jobId}`[0]?.reportSessionId;
+      if(!reportSessionId)return this.json({code:"journal_job_not_found"},404);
+    }
+    if(reportSessionId){
+      // Never turn an arbitrary UUID from the URL into a billable DO instance.
+      const report=this.sql<{id:string;createdAt:number;expiresAt:number}>`SELECT id,createdAt,expiresAt FROM niao_report_usage_sessions WHERE id=${reportSessionId}`[0];
+      if(!report)return this.json({code:"report_session_not_found"},404);
+      try{
+        const agent=await getAgentByName(namespace,report.id);
+        return this.json({v:1,reportSessionId:report.id,createdAt:report.createdAt,expiresAt:report.expiresAt,jobId:jobId ?? null,
+          ...await agent.usage({jobId,before,limit})});
+      }catch{return this.json({code:"journal_usage_unavailable"},503);}
+    }
+    const reports=this.sql<{cursor:number;id:string;createdAt:number;expiresAt:number}>`
+      SELECT rowid AS cursor,id,createdAt,expiresAt FROM niao_report_usage_sessions
+      WHERE (${before}=0 OR rowid<${before}) ORDER BY rowid DESC LIMIT ${limit+1}`;
+    const page=reports.slice(0,limit);
+    const sessions=await Promise.all(page.map(async report=>{
+      const metadata={reportSessionId:report.id,createdAt:report.createdAt,expiresAt:report.expiresAt};
+      try{
+        const agent=await getAgentByName(namespace,report.id);
+        const usage=await agent.usage({summaryOnly:true});
+        return {...metadata,status:"available",...usage};
+      }catch{return {...metadata,status:"unavailable"};}
+    }));
+    return this.json({v:1,sessions,hasMore:reports.length>limit,nextCursor:page.at(-1)?.cursor ?? null});
+  }
   private async usageResponse(): Promise<Response> {
     // Retry the date selection if UTC midnight passes during the remote request.
     let now = new Date();
@@ -245,13 +286,16 @@ export class NiaoAgent extends Agent<Env> {
     if(data.reportSessionId && (!report || report.expiresAt<=now)){await this.cancelSchedule(recovery.id);return {ok:false,error:"report_session_expired"};}
     if(!report){report={id:crypto.randomUUID(),expiresAt:now+reportLifetime};
       this.sql`INSERT INTO niao_report_sessions VALUES (${report.id},${sessionId},${epoch},${now},${report.expiresAt})`;}
+    this.sql`INSERT OR IGNORE INTO niao_report_usage_sessions SELECT id,createdAt,expiresAt FROM niao_report_sessions WHERE id=${report.id}`;
     const review=this.sql<{articleId:string;updatedAt:string;reviewJobId:string}>`SELECT * FROM niao_report_reviews WHERE sessionId=${sessionId} AND epoch=${epoch} AND reportSessionId=${report.id} AND expiresAt>${now}`[0];
     const user=this.sql<{content:string;seq:number}>`SELECT content,seq FROM niao_messages WHERE requestId=${requestId} AND sessionId=${sessionId} AND role='user'`[0];
-    const shown=review ? this.sql<{seq:number}>`SELECT seq FROM niao_messages WHERE id=${`journal-agent:${review.reviewJobId}`}`[0] : undefined;
     const outstanding=this.sql`SELECT id FROM niao_report_jobs WHERE reportSessionId=${report.id} AND status NOT IN ('notified','cancelled') LIMIT 1`.length;
-    const approval=review && user && shown && user.seq>shown.seq && isPublicationApproval(user.content) && !outstanding
-      ? JSON.stringify({articleId:review.articleId,expectedUpdatedAt:review.updatedAt}) : null;
-    if(user && isPublicationApproval(user.content) && !approval){await this.cancelSchedule(recovery.id);return {ok:false,error:"draft_review_required"};}
+    const requested=!(user && isPublicationDenial(user.content)) && (isPublicationApproval(data.prompt) || !!user && isPublicationApproval(user.content));
+    // Explicit references to another article must be resolved by the writing agent.
+    const otherTarget=review && [data.prompt,user?.content ?? ""].some(text=>
+      [...text.matchAll(/[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/giu)].some(m=>m[0]!==review.articleId));
+    const approval=requested ? JSON.stringify(review && !outstanding && !otherTarget
+      ? {articleId:review.articleId,expectedUpdatedAt:review.updatedAt} : {}) : null;
     if(!approval)this.sql`DELETE FROM niao_report_reviews WHERE sessionId=${sessionId}`;
     this.sql`INSERT INTO niao_report_jobs(id,sessionId,epoch,requestId,prompt,reportSessionId,createdAt,expiresAt,status)
       VALUES (${id},${sessionId},${epoch},${requestId},${data.prompt},${report.id},${now},${report.expiresAt},'pending')`;
@@ -314,8 +358,7 @@ export class NiaoAgent extends Agent<Env> {
   journalPublicationApproval(jobId:string):PublicationApproval|null {
     if(!this.journalJobAlive(jobId))return null;
     const job=this.sql<ReportJob>`SELECT * FROM niao_report_jobs WHERE id=${jobId}`[0];
-    const review=this.sql`SELECT articleId FROM niao_report_reviews WHERE sessionId=${job.sessionId} AND epoch=${job.epoch} AND reportSessionId=${job.reportSessionId} AND approvedJobId=${jobId} AND expiresAt>${Date.now()}`[0];
-    return review && job.approval ? JSON.parse(job.approval) : null;
+    return job.approval ? JSON.parse(job.approval) : null;
   }
   async completeJournalAgentJob(id:string,reportSessionId:string,result:string,reviewInput:DraftReview|null=null){
     const job=this.sql<ReportJob>`SELECT * FROM niao_report_jobs WHERE id=${id}`[0];

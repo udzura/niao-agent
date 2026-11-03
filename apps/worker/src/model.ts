@@ -44,11 +44,16 @@ export type ModelEvent = { thinking: { generation: number; text: string; active:
 export interface ChatModel {
   stream(messages: ModelMessage[], signal: AbortSignal): AsyncIterable<ModelEvent>;
 }
+export interface InferenceObserver {
+  started(round:number):void;
+  usage(round:number,usage:Record<string,number>):void;
+  completed(round:number):void;
+}
 
 // The only module aware of Workers AI's provider-specific input and SSE format.
 export class WorkersAIModel implements ChatModel {
   constructor(private ai: Ai, private modelId: ModelID, private executeRuby?: RubyExecutor, private thinkingEnabled = false,
-    private additionalTools: AdditionalTool[] = [], private options: {reasoningEffort?: "xhigh"; maxRounds?: number; maxToolCalls?: number; maxToolArgumentChars?:number; onConversation?: (messages: any[]) => void} = {}) { }
+    private additionalTools: AdditionalTool[] = [], private options: {reasoningEffort?: "xhigh"; maxCompletionTokens?:number; maxRounds?: number; maxToolCalls?: number; maxToolArgumentChars?:number; onConversation?: (messages: any[]) => void; observer?:InferenceObserver} = {}) { }
   async *stream(messages: ModelMessage[], signal: AbortSignal): AsyncIterable<ModelEvent> {
     const conversation: any[] = [...messages];
     if (this.modelId === "@cf/qwen/qwen3-30b-a3b-fp8") {
@@ -67,7 +72,7 @@ export class WorkersAIModel implements ChatModel {
         "Cite the original document URLs when referring to these sources. If the archive is unavailable, say so honestly; do not invent search results.";
       const guidance = [
         this.additionalTools.some(tool => tool.definition.function.name === "ask_journal_agent")
-          ? "For requests to write or revise Niao's journal, use ask_journal_agent. It dispatches an independent background agent. A receipt is not a completion: only acknowledge acceptance and wait for the separate result. Reuse the returned reportSessionId for explicit follow-ups. You cannot directly operate Journal MCP." : "",
+          ? "For requests to write, revise or publish Niao's journal, use ask_journal_agent. When publication is explicitly requested, include 公開して下さい in its prompt so the background agent proceeds through publication. Otherwise request a draft only. A receipt is not a completion: only acknowledge acceptance and wait for the separate result. Reuse the returned reportSessionId for explicit follow-ups. You cannot directly operate Journal MCP." : "",
         this.additionalTools.some(tool => tool.definition.function.name === "web_fetch_async")
           ? "Use web_fetch_async when the user explicitly requests a background/deferred read. Also, if web_fetch fails with web_fetch_timeout, web_fetch_unavailable, web_fetch_dns_failed, web_fetch_rate_limited, web_fetch_response_too_large, web_fetch_document_too_complex or web_fetch_extraction_failed, call web_fetch_async ONCE for that same URL before your final answer, unless the user forbids background work. Do not ask for confirmation just to make this fallback. The background reader offloads HTML parsing and Markdown conversion to Browser Run and accepts larger source pages, so size/DOM/extraction failures can be retried there once. Do NOT enqueue for unsafe URLs, invalid arguments, unsupported content types, encoding errors, empty content or output-size errors. Browser Run still has its own source, output and usage limits. Its result is only a job receipt, not article content. Only after an ok:true receipt, explain that the immediate read failed and background retrieval was accepted; a separate summary will arrive later. For an explicit background request, simply confirm acceptance. If enqueueing fails or the tool-call budget is exhausted, report that honestly; do not claim a job was started. Do not poll jobs, re-enqueue a failed fallback, or fetch the same URL synchronously after enqueueing." : "",
         this.additionalTools.some(tool => tool.definition.function.name === "web_fetch")
@@ -88,10 +93,12 @@ export class WorkersAIModel implements ChatModel {
       signal.throwIfAborted();
       if (round) yield { inferenceStarted: true };
       const started = Date.now();
+      this.options.observer?.started(round);
       const result = await this.ai.run(this.modelId, {
         messages: conversation, stream: true,
         ...modelThinkingOptions(this.modelId, this.thinkingEnabled),
         ...(this.options.reasoningEffort ? {reasoning_effort: this.options.reasoningEffort, max_completion_tokens: 16384} : {}),
+        ...(this.options.maxCompletionTokens ? {max_completion_tokens:this.options.maxCompletionTokens} : {}),
         stream_options: { include_usage: true },
         ...(tools.length ? { tools, parallel_tool_calls: false, tool_choice: round === rounds - 1 ? "none" : "auto" } : {}),
       }, { signal }).catch(error => { throw workersAIError(error); });
@@ -139,7 +146,10 @@ export class WorkersAIModel implements ChatModel {
               const output = reasoningAdapter.transform(event.reasoning);
               yield* normalize({ thinking: (output.thinking ?? "") + (output.content ?? ""), thinkingActive: true });
             }
-          } else yield event;
+          } else {
+            if("usage" in event)this.options.observer?.usage(round,event.usage);
+            yield event;
+          }
         }
       }
       const remainingReasoning = reasoningAdapter.flush();
@@ -148,6 +158,7 @@ export class WorkersAIModel implements ChatModel {
       }
       yield* normalize(adapter.flush());
       if (sawThinking) yield { thinking: { generation: round, text: "", active: false } };
+      this.options.observer?.completed(round);
       console.log(JSON.stringify({ event: "llm.request.complete", model: this.modelId, round, durationMs: Date.now() - started }));
       if (!calls.size) {
         conversation.push({role: "assistant", content});

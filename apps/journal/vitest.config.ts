@@ -9,5 +9,5 @@ export default defineConfig({
       JOURNAL_PUBLISH_TOKEN: "journal-publisher-token-000000000000000",
     }},
   })],
-  test: {testTimeout: 15000, hookTimeout: 15000},
+  test: {include: ["tests/**/*.test.ts"], testTimeout: 15000, hookTimeout: 15000},
 });

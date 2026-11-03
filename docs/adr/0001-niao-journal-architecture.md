@@ -1,5 +1,7 @@
 # 0001: Niao Journal publishing architecture
 
+2026-11-03 amendment: [ADR 0002](0002-asynchronous-journal-agent.md) also supersedes the human-only publication approval and no-deletion decisions. Explicit delegated publication instructions are accepted; deletion is available only through an operator CLI with generation-based cache isolation.
+
 ## Status
 
 Accepted — 2026-11-02. Implemented in this repository; deployment is a separate operation.
