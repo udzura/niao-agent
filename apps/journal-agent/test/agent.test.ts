@@ -19,19 +19,19 @@ it("reads the official GitHub latest-release API directly without fallback reque
   await expect(latestRelease(new AbortController().signal,async(input)=>{urls.push(String(input));return new Response(null,{status:503});})).rejects.toThrow("release_unavailable");
   expect(urls).toEqual([RELEASE_URL]);
 });
-it("uses Gemma with thinking off, 4096 output tokens and no more than six inference rounds",async()=>{
+it("uses Gemma with thinking off, 8192 output tokens and no more than twelve inference rounds",async()=>{
   const report=await getAgentByName(bindings.JournalAgent,crypto.randomUUID());
   await runInDurableObject(report,async(a:any)=>{
     let calls=0;
     a.env.AI={run:async(model:string,input:any)=>{
       calls++;expect(model).toBe("@cf/google/gemma-4-26b-a4b-it");expect(input.reasoning_effort).toBeUndefined();
-      expect(input.chat_template_kwargs.enable_thinking).toBe(false);expect(input.max_completion_tokens).toBe(4096);
-      expect(input.tool_choice).toBe(calls===6 ? "none" : "auto");
+      expect(input.chat_template_kwargs.enable_thinking).toBe(false);expect(input.max_completion_tokens).toBe(8192);
+      expect(input.tool_choice).toBe(calls===12 ? "none" : "auto");
       return new ReadableStream({start(c){c.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call","function":{"name":"read","arguments":"{}"}}]}}]}\n\ndata: [DONE]\n\n'));c.close();}});
     }};
     const model=a.createModel([{definition:{type:"function",function:{name:"read",parameters:{type:"object"}}},execute:async()=>({ok:true})}],()=>{});
     await expect((async()=>{for await(const _ of model.stream([{role:"user",content:"日報"}],new AbortController().signal)){}})()).rejects.toMatchObject({code:"tool_limit"});
-    expect(calls).toBe(6);
+    expect(calls).toBe(12);
   });
 });
 it("uses an optional GitHub credential and exposes safe rate-limit/authentication errors",async()=>{

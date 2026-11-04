@@ -25,7 +25,7 @@ it("counts each inference once, distinguishes reported/estimated neurons, and ex
   await runInDurableObject(report,async(a:any)=>{
     let calls=0;a.onRunError=(error:unknown)=>{throw error;};
     a.env.AI={run:async(model:string,input:any)=>{
-      calls++;expect(model).toBe("@cf/google/gemma-4-26b-a4b-it");expect(input.max_completion_tokens).toBe(4096);
+      calls++;expect(model).toBe("@cf/google/gemma-4-26b-a4b-it");expect(input.max_completion_tokens).toBe(8192);
       expect(input.chat_template_kwargs.enable_thinking).toBe(false);expect(input.stream_options.include_usage).toBe(true);
       return calls===1 ? sse([
         {choices:[{delta:{tool_calls:[{index:0,id:"read-chat",function:{name:"read_today_chat_sessions",arguments:"{}"}}]}}]},
@@ -50,6 +50,28 @@ it("counts each inference once, distinguishes reported/estimated neurons, and ex
   await runInDurableObject(main,async(a:any)=>{await a.clearSession("legacy");});
   const retained=await (await api(`?jobId=${job.id}`)).json<any>();expect(retained.summary).toEqual(snapshot.summary);
   const list=await (await api()).json<any>();expect(list.sessions).toHaveLength(1);expect(list.sessions[0].summary).toEqual(snapshot.summary);
+});
+it("saves and reviews a long draft after more than six inference rounds without duplicating usage on replay",async()=>{
+  const {report,job}=await prepareJob();
+  const body="## 当日の会話から考えたこと\n\n"+"会話で確認した事実と、そこから考えたことを区別して記録します。".repeat(130);
+  expect(body.length).toBeGreaterThan(3000);
+  await runInDurableObject(report,async(a:any)=>{
+    let calls=0;a.onRunError=(error:unknown)=>{throw error;};
+    a.env.AI={run:async()=>{
+      calls++;
+      const delta=calls<=7 ? {tool_calls:[{index:0,id:`step-${calls}`,function:calls===7
+        ? {name:"journal_create_draft",arguments:JSON.stringify({title:"長い日報の保存検証",bodyMarkdown:body})}
+        : {name:"read_today_chat_sessions",arguments:"{}"}}]} : {content:"長い下書きを保存しました"};
+      return sse([{choices:[{delta}]},{usage:{prompt_tokens:100,completion_tokens:20,neurons:2}}]);
+    }};
+    expect(await a.run(job)).toBe("長い下書きを保存しました");
+    expect((await a.review(job.id)).bodyMarkdown).toBe(body);
+    await a.run(job);expect(calls).toBe(8);
+  });
+  const articles=await bindings.TEST_DB.prepare("SELECT body_markdown,status FROM articles").all();
+  expect(articles.results).toEqual([{body_markdown:body,status:"draft"}]);
+  const snapshot=await (await api(`?jobId=${job.id}`)).json<any>();
+  expect(snapshot.summary).toMatchObject({attempts:8,complete:true,neurons:16,source:"reported"});
 });
 it.each(["no_usage","partial_stream","provider_failure"])("does not report missing or interrupted inference usage as zero (%s)",async(mode)=>{
   const {report,job}=await prepareJob();
@@ -89,21 +111,21 @@ it("authenticates usage reads, rejects invalid/foreign IDs and never starts infe
   expect(measureUsage({neurons:NaN,prompt_tokens:-1,completion_tokens:Infinity})).toEqual({neurons:null,source:"unavailable"});
 });
 
-it("keeps the six-inference budget across a retry of an interrupted job",async()=>{
+it("keeps the twelve-inference budget across a retry of an interrupted job",async()=>{
   const {report,job}=await prepareJob();
   await runInDurableObject(report,async(a:any)=>{
     let calls=0;a.onRunError=(error:unknown)=>{throw error;};
     a.env.AI={run:async()=>{
-      calls++;if(calls===6)throw Error("provider interrupted");
+      calls++;if(calls===12)throw Error("provider interrupted");
       return sse([{choices:[{delta:{tool_calls:[{index:0,id:`chat-${calls}`,function:{name:"read_today_chat_sessions",arguments:"{}"}}]}}]},
         {usage:{prompt_tokens:100,completion_tokens:10}}]);
     }};
-    await expect(a.run(job)).rejects.toThrow();expect(calls).toBe(6);
+    await expect(a.run(job)).rejects.toThrow();expect(calls).toBe(12);
   });
   await evictDurableObject(report,{webSockets:"close"});
   await runInDurableObject(report,async(a:any)=>{
     let calls=0;a.onRunError=()=>{};a.env.AI={run:async()=>{calls++;throw Error("unexpected inference");}};
     await a.run(job);expect(calls).toBe(0);
-    expect((await a.usage({jobId:job.id})).summary).toMatchObject({attempts:6,incompleteAttempts:1,neurons:null});
+    expect((await a.usage({jobId:job.id})).summary).toMatchObject({attempts:12,incompleteAttempts:1,neurons:null});
   });
 });
