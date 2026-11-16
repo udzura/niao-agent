@@ -1,6 +1,6 @@
 # モデル設定・履歴削除API
 
-すべて既存の `NIAO_TOKEN` による Bearer 認証が必要です。追加のCloudflareシークレットは不要です。以下は `NIAO_BACKEND_URL` と `NIAO_TOKEN` を環境変数に設定済みの例です。
+すべて既存の `NIAO_TOKEN` による Bearer 認証が必要です。以下は `NIAO_BACKEND_URL` と `NIAO_TOKEN` を環境変数に設定済みの例です。
 
 ## モデルとthinking設定を取得・変更する
 
@@ -15,7 +15,7 @@ curl --fail-with-body -X PUT \
   "$NIAO_BACKEND_URL/agents/niao-agent/personal/settings"
 ```
 
-レスポンスには `modelId`（現在の選択）、`thinkingMode`（`auto/on/off`）、`thinkingPolicy`（閾値・曖昧時方針・タイムアウト）、旧形式互換の `thinkingEnabled`、`models`（選択可能なID・表示名・`supportsThinking`）、`epoch`（会話の世代）、`v: 1` が含まれます。現在の回答モデル候補は以下の7つです。
+レスポンスには `modelId`（現在の選択）、`thinkingMode`（`auto/on/off`）、`thinkingPolicy`（閾値・曖昧時方針・タイムアウト）、旧形式互換の `thinkingEnabled`、`models`（選択可能なID・表示名・`supportsThinking`）、`epoch`（会話の世代）、`v: 1` が含まれます。
 
 - `@cf/google/gemma-4-26b-a4b-it`（既定）
 - `@cf/zai-org/glm-4.7-flash`
@@ -24,6 +24,7 @@ curl --fail-with-body -X PUT \
 - `@cf/meta/llama-4-scout-17b-16e-instruct`
 - `@cf/qwen/qwen3-30b-a3b-fp8`
 - `@cf/qwen/qwen3.8-27b`
+- `openai/gpt-4.1-mini`（[`OPENAI_GATEWAY_ID` 設定時](../README.md#gpt-41-mini-を-ai-gateway-経由で使う)、Thinking 対象外）
 
 モデルとthinking設定はSQLiteに永続化され、次の会話ターンから適用されます。生成中の応答は、ツール実行後の続きも含めて開始時の設定を使い続けます。失敗した応答を再試行する際は新しい設定を使用します。完了済み送信の再送には保存済みの応答を返します。
 

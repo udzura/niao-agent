@@ -1,6 +1,9 @@
 # Generate a random value: openssl rand -hex 32
 NIAO_TOKEN=
 
+# Optional: AI Gateway ID for OpenAI BYOK (with the OpenAI key stored on the gateway).
+OPENAI_GATEWAY_ID=
+
 # Optional: account-wide Workers AI, Workers and Durable Objects usage (see docs/usage.md).
 # Permission: Account > Account Analytics > Read
 # Additional permission for Workers Free/Paid verification: Account > Billing > Read

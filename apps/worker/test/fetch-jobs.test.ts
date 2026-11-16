@@ -67,14 +67,25 @@ it("delivers a real local Queue producer message without a manual consumer invoc
   expect((await history()).messages).toHaveLength(3);
 });
 
-it("uses the production model/tool loop for enqueueing and a separate tool-free notification inference",async()=>{
+it.each(["@cf/google/gemma-4-26b-a4b-it", "openai/gpt-4.1-mini"])("uses %s for enqueueing and a separate tool-free notification inference",async(modelId)=>{
+  const gatewayId = "test-openai-gateway";
+  const isOpenAI = modelId === "openai/gpt-4.1-mini";
   await runInDurableObject(await stub(),(a:any)=>{
-    a.modelInputs=[];
-    a.env.AI={run:async(_model:string,input:any)=>{
-      a.modelInputs.push(input);
+    a.env.OPENAI_GATEWAY_ID = gatewayId;
+    a.env.AI={run:async(model:string,input:any,options:AiOptions)=>{
+      expect(model).toBe(modelId);
+      if (isOpenAI) {
+        expect(options.gateway).toEqual({id:gatewayId,skipCache:true});
+        expect(options.extraHeaders).toEqual({"cf-aig-no-wholesale":"true"});
+        expect(input).toMatchObject({max_completion_tokens:2048,stream:true,stream_options:{include_usage:true}});
+        expect(input.chat_template_kwargs).toBeUndefined();
+      } else {
+        expect(options.gateway).toBeUndefined();
+        expect(options.extraHeaders).toBeUndefined();
+        expect(input.chat_template_kwargs.enable_thinking).toBe(false);
+      }
       let delta:any;
       if(!input.tools){
-        expect(input.chat_template_kwargs.enable_thinking).toBe(false);
         expect(JSON.parse(input.messages[1].content).result.title).toBe("日本語の技術メモ");
         delta={content:"バックグラウンド取得の要約です"};
       }else if(input.messages.at(-1).role==="tool"){
@@ -85,16 +96,25 @@ it("uses the production model/tool loop for enqueueing and a separate tool-free 
         expect(input.messages[0].content).toContain("only a job receipt");
         delta={tool_calls:[{index:0,id:"async-read",function:{name:"web_fetch_async",arguments:JSON.stringify({url})}}]};
       }
+      const usage = isOpenAI ? {prompt_tokens:5,completion_tokens:2,total_tokens:7} : {neurons:2};
       return new ReadableStream({start(c){
-        c.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({choices:[{delta}],usage:{neurons:2}})}\n\ndata: [DONE]\n\n`));c.close();
+        c.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({choices:[{delta}]})}\n\ndata: ${JSON.stringify({choices:[],usage})}\n\ndata: [DONE]\n\n`));c.close();
       }});
     }};
   });
+  const response = await SELF.fetch(`${base}/settings`, {
+    method:"PUT", headers:{...headers,"Content-Type":"application/json"}, body:JSON.stringify({modelId}),
+  });
+  expect(response.status).toBe(200);
+  const settings = await response.json<any>();
+  expect(settings.modelId).toBe(modelId);
+  expect(settings.models).toContainEqual({id:"openai/gpt-4.1-mini",name:"GPT-4.1 mini",supportsThinking:false});
+  expect(JSON.stringify(settings)).not.toContain(gatewayId);
   const client=await start();await until(()=>client.events.find(e=>e.type==="message_added"));
   expect(client.events.filter(e=>e.type==="tool_status").map(e=>e.name)).toEqual(["web_fetch_async","web_fetch_async"]);
   expect((await history()).messages.map((m:any)=>m.content)).toEqual(["この記事を後で読んでおいて","取得を受け付けました","バックグラウンド取得の要約です"]);
   const usage=await(await SELF.fetch(`${base}/usage`,{headers})).json<any>();
-  expect(usage.local).toMatchObject({attempts:3,neurons:6});
+  expect(usage.local).toMatchObject({attempts:3,neurons:isOpenAI ? 0 : 6,unmeasuredAttempts:isOpenAI ? 3 : 0});
 });
 
 it("runs tool -> durable outbox -> Queue consumer -> real tools RPC -> persisted follow-up and usage",async()=>{

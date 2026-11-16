@@ -275,11 +275,31 @@ describe("model settings and conversation cleanup", () => {
     expect((await SELF.fetch(`${base}/settings`, {method: "PUT", body: "{}"})).status).toBe(401);
     expect((await SELF.fetch(`${base}/history`, {method: "DELETE"})).status).toBe(401);
     expect((await put("@cf/not-a-chat-model" )).status).toBe(400);
+    const openAI = await put("openai/gpt-4.1-mini");
+    expect(openAI.status).toBe(400);
+    expect(await openAI.json()).toEqual({code:"unsupported_model"});
     expect((await SELF.fetch(`${base}/settings`, {method: "PUT", headers: {...headers, "Content-Type": "application/json"}, body: "null"})).status).toBe(400);
     expect((await SELF.fetch(`${base}/history`, {method: "DELETE", headers})).status).toBe(428);
     const settings = await (await SELF.fetch(`${base}/settings`, {headers})).json<any>();
     expect(settings.serverVersion).toBe(version);
     expect(settings.modelId).toBe(gemma); expect(settings.models.map((x: any) => x.id)).toEqual([gemma, glm, "@cf/ibm-granite/granite-4.0-h-micro", "@cf/meta/llama-3.3-70b-instruct-fp8-fast", "@cf/meta/llama-4-scout-17b-16e-instruct", "@cf/qwen/qwen3-30b-a3b-fp8", "@cf/qwen/qwen3.8-27b"]);
+  });
+  it("fails a saved OpenAI selection when its gateway secret is removed", async () => {
+    const selected = "openai/gpt-4.1-mini";
+    await runInDurableObject(await stub(), (agent: NiaoAgent) => {
+      (agent as any).env.OPENAI_GATEWAY_ID = "test-openai-gateway";
+    });
+    const updated = await put(selected);
+    expect(updated.status).toBe(200); await updated.text();
+    await runInDurableObject(await stub(), (agent: NiaoAgent) => {
+      delete (agent as any).env.OPENAI_GATEWAY_ID;
+      (agent as any).env.AI = {run: async () => { throw new Error("Unexpected provider call"); }};
+    });
+    const client = await connect(); const id = crypto.randomUUID(); send(client.ws, id);
+    expect(await client.until(e => e.type === "error" && e.requestId === id)).toMatchObject({
+      code: "ai_unavailable", details: {message: "OPENAI_GATEWAY_ID is required for this model."},
+    });
+    expect((await put(gemma)).status).toBe(200);
   });
   it.each([glm,"@cf/meta/llama-3.3-70b-instruct-fp8-fast","@cf/ibm-granite/granite-4.0-h-micro", "@cf/meta/llama-4-scout-17b-16e-instruct", "@cf/qwen/qwen3-30b-a3b-fp8"])("persists %s across eviction and uses it for inference", async selected => {
     const updated = await put(selected);

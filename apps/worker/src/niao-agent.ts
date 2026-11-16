@@ -3,7 +3,7 @@ import {version} from "../../../version.json";
 import { rubyExecutor } from "./ruby/tool";
 import { Agent, getAgentByName, type Connection, type ConnectionContext, type WSMessage } from "agents";
 import type { Env } from "./index";
-import { boundedContext, DEFAULT_MODEL, MODELS, isModelID, supportsThinking, type ModelID, WorkersAIModel, type ChatModel, type ModelMessage } from "./model";
+import { boundedContext, DEFAULT_MODEL, MODELS, OPENAI_BYOK_MODEL, isModelID, supportsThinking, type ModelID, WorkersAIModel, type ChatModel, type ModelMessage } from "./model";
 import { ChatError, errorCode, parseSubmission, type Message, type Turn, type ThinkingSegment } from "./protocol";
 import { ClefThinkingJudge, isThinkingMode, thinkingPolicy, JUDGE_MODEL, type ThinkingMode, type ThinkingPolicy, type ThinkingJudge } from "./thinking-policy";
 
@@ -139,7 +139,8 @@ export class NiaoAgent extends Agent<Env> {
       } catch { return this.json({code: "invalid_settings"}, 400); }
       if (!body || typeof body !== "object" || Array.isArray(body) ||
         ![body.modelId,body.thinkingMode,body.thinkingEnabled,body.thinkingPolicy].some(value => value !== undefined)) return this.json({code:"invalid_settings"},400);
-      if (body.modelId !== undefined && !isModelID(body.modelId)) return this.json({code: "unsupported_model"}, 400);
+      if (body.modelId !== undefined && (!isModelID(body.modelId) || (body.modelId === OPENAI_BYOK_MODEL && !this.openAIGatewayId)))
+        return this.json({code: "unsupported_model"}, 400);
       if (body.thinkingEnabled !== undefined && typeof body.thinkingEnabled !== "boolean") return this.json({code: "invalid_settings"}, 400);
       if (body.thinkingMode !== undefined && (!isThinkingMode(body.thinkingMode) || body.thinkingEnabled !== undefined)) return this.json({code:"invalid_settings"},400);
       const current = this.settings();
@@ -260,10 +261,16 @@ export class NiaoAgent extends Agent<Env> {
     const row = this.sql<{modelId:ModelID;epoch:number;thinkingMode:ThinkingMode;thinkingPolicy:string}>`SELECT modelId, epoch, thinkingMode, thinkingPolicy FROM niao_settings WHERE id = 1`[0];
     return {...row,epoch:row.epoch,thinkingPolicy:thinkingPolicy(JSON.parse(row.thinkingPolicy))};
   }
-  private settingsResponse() { const settings = this.settings(); return {v:1,...settings,serverVersion:version,thinkingEnabled:settings.thinkingMode === "on",models:MODELS}; }
+  private get openAIGatewayId() { return this.env.OPENAI_GATEWAY_ID?.trim() || undefined; }
+  private settingsResponse() {
+    const settings = this.settings();
+    const models = this.openAIGatewayId ? MODELS : MODELS.filter(model => model.id !== OPENAI_BYOK_MODEL);
+    return {v:1,...settings,serverVersion:version,thinkingEnabled:settings.thinkingMode === "on",models};
+  }
   private json(data: object, status = 200) { return Response.json(data, {status, headers: {"Cache-Control": "no-store"}}); }
   protected createModel(modelId: ModelID, thinkingEnabled: boolean, tools: AdditionalTool[] = []): ChatModel {
-    return new WorkersAIModel(this.env.AI, modelId, rubyExecutor(this.env.RUBY_RUNNER), thinkingEnabled, [...miscTools(this.env.TOOLS_MISC), ...tools]);
+    return new WorkersAIModel(this.env.AI, modelId, rubyExecutor(this.env.RUBY_RUNNER), thinkingEnabled,
+      [...miscTools(this.env.TOOLS_MISC), ...tools], {openAIGatewayId: this.openAIGatewayId});
   }
   protected createThinkingJudge(): ThinkingJudge { return new ClefThinkingJudge(this.env.AI); }
   async enqueueJournalAgent(input:unknown,requestId:string,epoch:number) {
@@ -398,7 +405,7 @@ export class NiaoAgent extends Agent<Env> {
   }
   protected createNotificationModel(modelId:ModelID): ChatModel {
     // Background summaries cannot enqueue more work or invoke unrelated tools.
-    return new WorkersAIModel(this.env.AI,modelId,undefined,false,[]);
+    return new WorkersAIModel(this.env.AI,modelId,undefined,false,[],{openAIGatewayId: this.openAIGatewayId});
   }
 
   private jobsSnapshot() {

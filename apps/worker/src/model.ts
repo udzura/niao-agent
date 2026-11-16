@@ -3,6 +3,8 @@ import { rubyTool, type RubyExecutor } from "./ruby/tool";
 import { ChatError } from "./protocol";
 import { workersAIError } from "./ai-errors";
 import type { AdditionalTool } from "./past-logs";
+
+export const OPENAI_BYOK_MODEL = "openai/gpt-4.1-mini";
 export const MODELS = [
   { id: "@cf/google/gemma-4-26b-a4b-it", name: "Gemma 4 · 26B A4B", supportsThinking: true },
   { id: "@cf/zai-org/glm-4.7-flash", name: "GLM 4.7 Flash", supportsThinking: false },
@@ -11,6 +13,7 @@ export const MODELS = [
   { id: "@cf/meta/llama-4-scout-17b-16e-instruct", name: "Llama 4 Scout · 17B-16E", supportsThinking: false },
   { id: "@cf/qwen/qwen3-30b-a3b-fp8", name: "Qwen3 · 30B A3B FP8", supportsThinking: true },
   { id: "@cf/qwen/qwen3.8-27b", name: "Qwen 3.8 · 27B", supportsThinking: true },
+  { id: OPENAI_BYOK_MODEL, name: "GPT-4.1 mini", supportsThinking: false },
 ] as const;
 export type ModelID = typeof MODELS[number]["id"];
 export const DEFAULT_MODEL: ModelID = MODELS[0].id;
@@ -23,6 +26,7 @@ export function supportsThinking(modelId: ModelID): boolean {
 // Auto presets control whether to think, not reasoning depth. Keep the enabled
 // Qwen effort explicit instead of inheriting its expensive xhigh default.
 export function modelThinkingOptions(modelId: ModelID, enabled: boolean) {
+  if (modelId === OPENAI_BYOK_MODEL) return {max_completion_tokens:2048};
   // Qwen3's published Workers AI schema uses max_tokens and has no documented
   // template/effort options. Its per-turn soft switch is added to messages below.
   if (modelId === "@cf/qwen/qwen3-30b-a3b-fp8") return {max_tokens:enabled ? 4096 : 2048};
@@ -50,11 +54,20 @@ export interface InferenceObserver {
   completed(round:number):void;
 }
 
-// The only module aware of Workers AI's provider-specific input and SSE format.
+// The only module aware of the AI binding's model-specific inputs and SSE format.
 export class WorkersAIModel implements ChatModel {
   constructor(private ai: Ai, private modelId: ModelID, private executeRuby?: RubyExecutor, private thinkingEnabled = false,
-    private additionalTools: AdditionalTool[] = [], private options: {reasoningEffort?: "xhigh"; maxCompletionTokens?:number; maxRounds?: number; maxToolCalls?: number; maxToolArgumentChars?:number; onConversation?: (messages: any[]) => void; observer?:InferenceObserver} = {}) { }
+    private additionalTools: AdditionalTool[] = [], private options: {reasoningEffort?: "xhigh"; maxCompletionTokens?:number; maxRounds?: number; maxToolCalls?: number; maxToolArgumentChars?:number; onConversation?: (messages: any[]) => void; observer?:InferenceObserver; openAIGatewayId?:string} = {}) { }
   async *stream(messages: ModelMessage[], signal: AbortSignal): AsyncIterable<ModelEvent> {
+    const runOptions: AiOptions = { signal };
+    if (this.modelId === OPENAI_BYOK_MODEL) {
+      const gatewayId = this.options.openAIGatewayId;
+      if (!gatewayId) throw new ChatError("ai_unavailable", {
+        provider: "cloudflare", reason: "unknown", message: "OPENAI_GATEWAY_ID is required for this model.",
+      });
+      runOptions.gateway = { id: gatewayId, skipCache: true };
+      runOptions.extraHeaders = { "cf-aig-no-wholesale": "true" };
+    }
     const conversation: any[] = [...messages];
     if (this.modelId === "@cf/qwen/qwen3-30b-a3b-fp8") {
       let index=conversation.length-1;
@@ -94,14 +107,15 @@ export class WorkersAIModel implements ChatModel {
       if (round) yield { inferenceStarted: true };
       const started = Date.now();
       this.options.observer?.started(round);
-      const result = await this.ai.run(this.modelId, {
+      // Select the string overload for both Workers AI and Gateway catalog IDs.
+      const result = await this.ai.run<string>(this.modelId, {
         messages: conversation, stream: true,
         ...modelThinkingOptions(this.modelId, this.thinkingEnabled),
         ...(this.options.reasoningEffort ? {reasoning_effort: this.options.reasoningEffort, max_completion_tokens: 16384} : {}),
         ...(this.options.maxCompletionTokens ? {max_completion_tokens:this.options.maxCompletionTokens} : {}),
         stream_options: { include_usage: true },
         ...(tools.length ? { tools, parallel_tool_calls: false, tool_choice: round === rounds - 1 ? "none" : "auto" } : {}),
-      }, { signal }).catch(error => { throw workersAIError(error); });
+      }, runOptions).catch(error => { throw workersAIError(error); });
       if (!(result instanceof ReadableStream)) {
         if (result && typeof result === "object" && ("error" in result || "errors" in result)) throw workersAIError(result);
         throw new ChatError("invalid_ai_response");

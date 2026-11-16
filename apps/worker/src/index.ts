@@ -10,6 +10,7 @@ export interface Env {
   NiaoAgent: DurableObjectNamespace<NiaoAgent>;
   FETCH_JOBS?: Queue<FetchJobMessage>;
   AI: Ai;
+  OPENAI_GATEWAY_ID?: string;
   NIAO_TOKEN: string;
   CHAT_RETENTION_DAYS?: string;
   CF_ACCOUNT_ID?: string;

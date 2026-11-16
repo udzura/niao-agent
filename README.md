@@ -135,6 +135,17 @@ open apps/macos/build/Build/Products/Debug/Niao.app
 
 認証付きAPIからも操作できます。具体例と注意点は [モデル設定・履歴削除API](docs/chat-controls.md) を参照してください。
 
+### GPT-4.1 mini を AI Gateway 経由で使う
+
+Worker と同じ Cloudflare アカウントの認証付き AI Gateway で、**Provider Keys** に OpenAI API キーを `default` エイリアスで登録します。Worker には Gateway ID をシークレットとして設定します。ローカル開発では `apps/worker/.dev.vars` の `OPENAI_GATEWAY_ID` に設定します。[Cloudflare の BYOK 設定](https://developers.cloudflare.com/ai-gateway/configuration/bring-your-own-keys/)
+
+```sh
+cd apps/worker
+npx wrangler secret put OPENAI_GATEWAY_ID
+```
+
+シークレットを設定すると、モデルの選択肢に `GPT-4.1 mini` が表示されます。このモデルを選ぶと、チャットの応答とバックグラウンドの取得結果の要約に Gateway の OpenAI キーを使います。OpenAI へのリクエストには Unified Billing へのフォールバックを無効にする `cf-aig-no-wholesale` ヘッダーを付けます。[Cloudflare の課金設定](https://developers.cloudflare.com/ai-gateway/features/unified-billing/#prevent-unified-billing-fallback-for-byok-third-party-providers)
+
 ## KeychainアクセスとTouch ID
 
 接続トークンの読み書きの前に、NiaoがTouch IDまたはMacのパスワードで本人確認します。本人確認済み状態は起動中に共有し、スリープ・画面消灯・ユーザーセッション切り替えで失効します。キャンセル後は「再接続」や設定から再試行してください。
