@@ -469,12 +469,13 @@ struct ChatView: View {
                     inputFocused = false
                     thinkingPresented = true
                 } label: {
-                    Image(systemName: (store.agentSettings?.thinkingChoice ?? .off) == .off ? "lightbulb" : "lightbulb.fill")
-                        .foregroundStyle((store.agentSettings?.thinkingChoice ?? .off) == .off ? Color.secondary : Color.accentColor)
+                    let active = store.agentSettings?.thinkingControlActive == true
+                    Image(systemName: active ? "lightbulb.fill" : "lightbulb")
+                        .foregroundStyle(active ? Color.accentColor : Color.secondary)
                         .touchTarget()
                 }
-                .accessibilityLabel("Thinkingを調整")
-                .accessibilityValue(store.agentSettings?.thinkingChoice.label ?? "未取得")
+                .accessibilityLabel(store.agentSettings?.reasoning == nil ? "Thinkingを調整" : "Reasoningを調整")
+                .accessibilityValue(store.agentSettings?.thinkingControlLabel ?? "未取得")
                 .popover(isPresented: $thinkingPresented, arrowEdge: .bottom) {
                     ThinkingSlider(store: store, compact: true)
                         .padding(20).frame(width: 320)
@@ -606,19 +607,28 @@ struct ThinkingSlider: View {
     @State private var editing = false
     private static let choices: [ThinkingChoice] = [.off, .automaticSelective, .automatic, .automaticFrequent, .on]
     private var saved: ThinkingChoice { store.agentSettings?.thinkingChoice ?? .off }
-    private var selected: ThinkingChoice { Self.choices[min(4, max(0, Int(position.rounded())))] }
+    private var reasoning: ReasoningSetting? { store.agentSettings?.reasoning }
+    private var reasoningOptions: [ReasoningEffort] {
+        guard reasoning != nil else { return [] }
+        return store.agentSettings?.selectedModel?.reasoningEfforts ?? []
+    }
+    private var lastIndex: Int { (reasoningOptions.isEmpty ? Self.choices.count : reasoningOptions.count) - 1 }
+    private var selectedIndex: Int { min(lastIndex, max(0, Int(position.rounded()))) }
+    private var controlName: String { reasoningOptions.isEmpty ? "Thinking" : "Reasoning" }
+    private var displayLabel: String {
+        if !editing { return store.agentSettings?.thinkingControlLabel ?? saved.label }
+        return reasoningOptions.isEmpty ? Self.choices[selectedIndex].label : reasoningOptions[selectedIndex].label
+    }
     private var enabled: Bool {
         store.connected && !store.controlBusy &&
-        store.agentSettings?.models.first(where: { $0.id == store.agentSettings?.modelId })?.supportsThinking == true
+        (store.agentSettings?.selectedModel?.supportsThinking == true || reasoningOptions.count > 1)
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             if compact {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("現在のモデル").font(.caption).foregroundStyle(.secondary)
-                    Text(store.agentSettings.flatMap { settings in
-                        settings.models.first { $0.id == settings.modelId }?.name ?? settings.modelId
-                    } ?? "未取得")
+                    Text(store.agentSettings?.selectedModel?.name ?? store.agentSettings?.modelId ?? "未取得")
                     .font(.subheadline.weight(.semibold)).textSelection(.enabled)
                     .accessibilityIdentifier("thinking-model-name")
                 }
@@ -629,6 +639,8 @@ struct ThinkingSlider: View {
         }
         .onAppear { restorePosition() }
         .onChange(of: store.agentSettings?.thinkingChoice) { _, _ in if !editing { restorePosition() } }
+        .onChange(of: reasoning) { _, _ in if !editing { restorePosition() } }
+        .onChange(of: store.agentSettings?.modelId) { _, _ in editing = false; restorePosition() }
         .onChange(of: store.controlBusy) { _, busy in if !busy && !editing { restorePosition() } }
         .onChange(of: store.connected) { _, connected in
             if !connected { editing = false; restorePosition() }
@@ -636,18 +648,18 @@ struct ThinkingSlider: View {
     }
     private var selectionLabel: some View {
         HStack(spacing: 4) {
-            Text("Thinking:")
-            Text(editing ? selected.label : saved.label).foregroundStyle(.secondary)
+            Text(controlName)
+            Text(displayLabel).foregroundStyle(.secondary)
         }.font(.caption)
     }
     private var sliderRow: some View {
         HStack(spacing: 8) {
-            Text("OFF").font(.caption2).foregroundStyle(.secondary)
+            Text(reasoningOptions.first?.label ?? "OFF").font(.caption2).foregroundStyle(.secondary)
             Slider(value: Binding(get: { position }, set: { value in
                 position = value
                 // Keyboard and accessibility adjustments can arrive outside a drag.
                 if !editing { save() }
-            }), in: 0...4, step: 1, onEditingChanged: { active in
+            }), in: 0...Double(max(1, lastIndex)), step: 1, onEditingChanged: { active in
                 editing = active
                 if !active { save() }
             })
@@ -658,22 +670,34 @@ struct ThinkingSlider: View {
             .frame(minWidth: 60, idealWidth: 160, maxWidth: 220)
             #endif
             .disabled(!enabled)
-            .accessibilityLabel("Thinking")
-            .accessibilityValue(editing ? selected.label : saved.label)
-            .help("左端は常にOFF、中央3段階は自動（控えめ・標準・多め）、右端は常にON。変更は次のターンから適用します。")
-            Text("ON").font(.caption2).foregroundStyle(.secondary)
+            .accessibilityLabel(controlName)
+            .accessibilityValue(displayLabel)
+            .help(reasoningOptions.isEmpty
+                ? "左端は常にOFF、中央3段階は自動（控えめ・標準・多め）、右端は常にON。変更は次のターンから適用します。"
+                : "推論の強さを選びます。変更は次のターンから適用します。")
+            Text(reasoningOptions.last?.label ?? "ON").font(.caption2).foregroundStyle(.secondary)
             if !compact { selectionLabel.fixedSize() }
             if store.controlBusy { ProgressView().controlSize(.small) }
             Spacer(minLength: 0)
         }
     }
     private func restorePosition() {
+        if let reasoning, let index = reasoningOptions.firstIndex(of: reasoning.effort) {
+            position = Double(index)
+            return
+        }
         // Custom API policies stay untouched until the user explicitly moves the slider.
         position = Double(Self.choices.firstIndex(of: saved) ?? 2)
     }
     private func save() {
-        guard enabled, selected != saved else { return }
-        store.updateThinking(selected)
+        guard enabled else { return }
+        if let reasoning, !reasoningOptions.isEmpty {
+            let effort = reasoningOptions[selectedIndex]
+            if effort != reasoning.effort { store.updateReasoning(ReasoningSetting(modelId: reasoning.modelId, effort: effort)) }
+        } else {
+            let selected = Self.choices[selectedIndex]
+            if selected != saved { store.updateThinking(selected) }
+        }
     }
 }
 
@@ -698,6 +722,7 @@ struct SettingsView: View {
     @State private var token = ""
     @State private var credentialBusy = false
     @State private var selectedModel = ""
+    @State private var selectedJournalModel = ""
     @State private var error: String?
     var body: some View {
         ScrollView {
@@ -732,17 +757,26 @@ struct SettingsView: View {
                 Divider()
                 if let settings = store.agentSettings {
                     Text("接続中の Agent のモデル設定").font(.headline)
-                    Picker("モデル", selection: $selectedModel) {
+                    Picker("チャットモデル", selection: $selectedModel) {
                         ForEach(settings.models) { model in Text(model.name).tag(model.id) }
                     }
-                    Text("Thinkingはチャットの入力欄から変更できます。Gemma 4・Qwenで利用でき、自動判定にはClef-flashの時間・使用量が発生します。")
+                    if let journalModelId = settings.journalModelId, !settings.journalModels.isEmpty {
+                        Picker("日報エージェント", selection: $selectedJournalModel) {
+                            ForEach(settings.journalModels) { model in Text(model.name).tag(model.id) }
+                            if !settings.journalModels.contains(where: { $0.id == journalModelId }) {
+                                Text("\(journalModelId)（利用不可）").tag(journalModelId)
+                            }
+                        }
+                    }
+                    Text("チャットの入力欄から、Gemma 4・Qwen の Thinking や GPT-6 系の Reasoning を調整できます。")
                         .font(.caption).foregroundStyle(.secondary)
                     HStack {
                         Text("変更後の推論から適用されます。").font(.caption).foregroundStyle(.secondary)
                         Spacer()
-                        Button("モデル設定を保存") { store.updateModelSettings(selectedModel) }
-                            .disabled(!store.connected || store.controlBusy || selectedModel.isEmpty ||
-                                      selectedModel == settings.modelId)
+                        let chatChange = selectedModel.isEmpty || selectedModel == settings.modelId ? nil : selectedModel
+                        let journalChange = selectedJournalModel.isEmpty || selectedJournalModel == settings.journalModelId ? nil : selectedJournalModel
+                        Button("モデル設定を保存") { store.updateModelSettings(chatChange, journalModelId: journalChange) }
+                            .disabled(!store.connected || store.controlBusy || (chatChange == nil && journalChange == nil))
                     }
                 }
                 if let error = error ?? store.error { Text(error).font(.caption).foregroundStyle(.red) }
@@ -766,10 +800,12 @@ struct SettingsView: View {
         .interactiveDismissDisabled(credentialBusy)
         .onAppear {
             selectedModel = store.agentSettings?.modelId ?? ""
+            selectedJournalModel = store.agentSettings?.journalModelId ?? ""
             url = store.backendURL
         }
         .task { await loadToken() }
         .onChange(of: store.agentSettings?.modelId) { _, value in selectedModel = value ?? "" }
+        .onChange(of: store.agentSettings?.journalModelId) { _, value in selectedJournalModel = value ?? "" }
         .onChange(of: url) { _, value in
             guard value != store.backendURL else { return }
             // Reading a saved credential is explicit; don't prompt on every keystroke.

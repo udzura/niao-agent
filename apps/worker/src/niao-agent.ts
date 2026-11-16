@@ -3,11 +3,14 @@ import {version} from "../../../version.json";
 import { rubyExecutor } from "./ruby/tool";
 import { Agent, getAgentByName, type Connection, type ConnectionContext, type WSMessage } from "agents";
 import type { Env } from "./index";
-import { boundedContext, DEFAULT_MODEL, MODELS, OPENAI_BYOK_MODEL, isModelID, supportsThinking, type ModelID, WorkersAIModel, type ChatModel, type ModelMessage } from "./model";
+import { boundedContext, DEFAULT_MODEL, DEFAULT_JOURNAL_MODEL, MODELS, JOURNAL_MODELS, isModelID, isJournalModelID,
+  usesOpenAIGateway, supportsThinking, isOpenAIReasoningEffort, openAIReasoningEffort, type OpenAIReasoningEffort,
+  type ModelID, type JournalModelID, WorkersAIModel, type ChatModel, type ModelMessage } from "./model";
 import { ChatError, errorCode, parseSubmission, type Message, type Turn, type ThinkingSegment } from "./protocol";
 import { ClefThinkingJudge, isThinkingMode, thinkingPolicy, JUDGE_MODEL, type ThinkingMode, type ThinkingPolicy, type ThinkingJudge } from "./thinking-policy";
 
 import { UsageAnalytics, utcDay, validNeurons } from "./usage";
+import { summarizeOpenAIUsage, tokenCount, tokyoDay, type OpenAIModelUsage } from "./openai-usage";
 import { PlatformAnalytics } from "./platform-usage";
 import { miscTools } from "./misc-tools";
 import { withPastLogsTools, type AdditionalTool } from "./past-logs";
@@ -68,13 +71,22 @@ export class NiaoAgent extends Agent<Env> {
     this.sql`CREATE TABLE IF NOT EXISTS niao_usage_attempts (
       id TEXT PRIMARY KEY, startedAt TEXT NOT NULL, neurons REAL
     )`;
+    const usageColumns = this.sql<{name:string}>`PRAGMA table_info(niao_usage_attempts)`;
+    for (const [column, type] of [["modelId", "TEXT"], ["inputTokens", "INTEGER"], ["outputTokens", "INTEGER"], ["totalTokens", "INTEGER"]]) {
+      if (!usageColumns.some(existing => existing.name === column))
+        this.ctx.storage.sql.exec(`ALTER TABLE niao_usage_attempts ADD COLUMN ${column} ${type}`);
+    }
     this.sql`CREATE TABLE IF NOT EXISTS niao_judge_attempts (
       id TEXT PRIMARY KEY, durationMs REAL, score REAL, reason TEXT,
       usageSource TEXT, inputTokens INTEGER, neuronsPerMillion REAL
     )`;
     this.sql`CREATE INDEX IF NOT EXISTS niao_usage_day ON niao_usage_attempts(startedAt)`;
     this.sql`CREATE TABLE IF NOT EXISTS niao_usage_meta (id INTEGER PRIMARY KEY, trackingSince TEXT NOT NULL)`;
-    this.sql`INSERT OR IGNORE INTO niao_usage_meta VALUES (1, ${new Date().toISOString()})`;
+    if (!this.sql<{name:string}>`PRAGMA table_info(niao_usage_meta)`.some(column => column.name === "openAITrackingSince"))
+      this.sql`ALTER TABLE niao_usage_meta ADD COLUMN openAITrackingSince TEXT`;
+    const trackingStart = new Date().toISOString();
+    this.sql`INSERT OR IGNORE INTO niao_usage_meta (id, trackingSince) VALUES (1, ${trackingStart})`;
+    this.sql`UPDATE niao_usage_meta SET openAITrackingSince = ${trackingStart} WHERE openAITrackingSince IS NULL`;
     this.sql`CREATE TABLE IF NOT EXISTS niao_settings (id INTEGER PRIMARY KEY, modelId TEXT NOT NULL, epoch INTEGER NOT NULL DEFAULT 0,
       thinkingEnabled INTEGER NOT NULL DEFAULT 0 CHECK (thinkingEnabled IN (0,1)))`;
     if (!this.sql<{name:string}>`PRAGMA table_info(niao_settings)`.some(column => column.name === "thinkingEnabled")) {
@@ -91,6 +103,10 @@ export class NiaoAgent extends Agent<Env> {
     if (!columns.some(column => column.name === "thinkingPolicy")) {
       this.sql`ALTER TABLE niao_settings ADD COLUMN thinkingPolicy TEXT NOT NULL DEFAULT '{}'`;
     }
+    if (!columns.some(column => column.name === "journalModelId")) {
+      this.sql`ALTER TABLE niao_settings ADD COLUMN journalModelId TEXT`;
+    }
+    this.sql`CREATE TABLE IF NOT EXISTS niao_reasoning_settings (modelId TEXT PRIMARY KEY, effort TEXT NOT NULL)`;
     // A fresh isolate cannot resume an in-flight provider stream. Keep the user message;
     // require an explicit retry instead of silently charging for another generation.
     this.sql`UPDATE niao_turns SET status = 'failed', errorCode = 'interrupted', errorDetails = NULL WHERE status = 'running'`;
@@ -102,7 +118,10 @@ export class NiaoAgent extends Agent<Env> {
     this.sql`CREATE TABLE IF NOT EXISTS niao_report_jobs (id TEXT PRIMARY KEY,sessionId TEXT NOT NULL,epoch INTEGER NOT NULL,requestId TEXT NOT NULL,prompt TEXT NOT NULL,reportSessionId TEXT NOT NULL,createdAt INTEGER NOT NULL,expiresAt INTEGER NOT NULL,status TEXT NOT NULL,dispatchedAt INTEGER NOT NULL DEFAULT 0,result TEXT, UNIQUE(sessionId,epoch,requestId,prompt))`;
     this.sql`INSERT OR IGNORE INTO niao_report_usage_sessions
       SELECT reportSessionId,MIN(createdAt),MAX(expiresAt) FROM niao_report_jobs GROUP BY reportSessionId`;
-    if(!this.sql<{name:string}>`PRAGMA table_info(niao_report_jobs)`.some(c=>c.name==="approval"))this.sql`ALTER TABLE niao_report_jobs ADD COLUMN approval TEXT`;
+    const reportColumns = this.sql<{name:string}>`PRAGMA table_info(niao_report_jobs)`;
+    if(!reportColumns.some(c=>c.name==="approval"))this.sql`ALTER TABLE niao_report_jobs ADD COLUMN approval TEXT`;
+    if(!reportColumns.some(c=>c.name==="modelId"))this.sql`ALTER TABLE niao_report_jobs ADD COLUMN modelId TEXT`;
+    this.sql`CREATE INDEX IF NOT EXISTS niao_report_jobs_by_session ON niao_report_jobs(reportSessionId)`;
     this.sql`CREATE TABLE IF NOT EXISTS niao_report_reviews (sessionId TEXT PRIMARY KEY,epoch INTEGER NOT NULL,reportSessionId TEXT NOT NULL,articleId TEXT NOT NULL,updatedAt TEXT NOT NULL,reviewJobId TEXT NOT NULL,expiresAt INTEGER NOT NULL,approvedJobId TEXT)`;
     for (const schedule of await this.listSchedules())
       if (["dailyJournal","maintainJournal"].includes(schedule.callback)) await this.cancelSchedule(schedule.id);
@@ -130,7 +149,8 @@ export class NiaoAgent extends Agent<Env> {
     if (url.pathname.endsWith("/settings")) {
       if (request.method === "GET") return this.json(this.settingsResponse());
       if (request.method !== "PUT") return this.json({code: "method_not_allowed"}, 405);
-      let body: {modelId?: unknown; thinkingEnabled?: unknown; thinkingMode?: unknown; thinkingPolicy?: unknown};
+      let body: {modelId?: unknown; journalModelId?: unknown; thinkingEnabled?: unknown; thinkingMode?: unknown;
+        thinkingPolicy?: unknown; reasoning?: unknown};
       try {
         if (!request.headers.get("Content-Type")?.startsWith("application/json")) return this.json({code: "invalid_settings"}, 400);
         const text = await request.text();
@@ -138,21 +158,36 @@ export class NiaoAgent extends Agent<Env> {
         body = JSON.parse(text);
       } catch { return this.json({code: "invalid_settings"}, 400); }
       if (!body || typeof body !== "object" || Array.isArray(body) ||
-        ![body.modelId,body.thinkingMode,body.thinkingEnabled,body.thinkingPolicy].some(value => value !== undefined)) return this.json({code:"invalid_settings"},400);
-      if (body.modelId !== undefined && (!isModelID(body.modelId) || (body.modelId === OPENAI_BYOK_MODEL && !this.openAIGatewayId)))
+        ![body.modelId,body.journalModelId,body.thinkingMode,body.thinkingEnabled,body.thinkingPolicy,body.reasoning].some(value => value !== undefined)) return this.json({code:"invalid_settings"},400);
+      if (body.modelId !== undefined && (!isModelID(body.modelId) || !this.modelAvailable(body.modelId)))
+        return this.json({code: "unsupported_model"}, 400);
+      if (body.journalModelId !== undefined && (!isJournalModelID(body.journalModelId) || !this.modelAvailable(body.journalModelId)))
         return this.json({code: "unsupported_model"}, 400);
       if (body.thinkingEnabled !== undefined && typeof body.thinkingEnabled !== "boolean") return this.json({code: "invalid_settings"}, 400);
       if (body.thinkingMode !== undefined && (!isThinkingMode(body.thinkingMode) || body.thinkingEnabled !== undefined)) return this.json({code:"invalid_settings"},400);
       const current = this.settings();
-      const modelId = body.modelId === undefined ? current.modelId : body.modelId as ModelID;
+      const modelId = body.modelId ?? current.modelId;
+      const journalModelId = body.journalModelId ?? current.journalModelId;
       const mode = (body.thinkingMode as ThinkingMode | undefined) ??
         (body.thinkingEnabled === undefined ? current.thinkingMode : body.thinkingEnabled ? "on" : "off");
+      let reasoning: {modelId:ModelID;effort:OpenAIReasoningEffort} | undefined;
+      if (body.reasoning !== undefined) {
+        const value = body.reasoning as {modelId?:unknown;effort?:unknown} | null;
+        if (!isModelID(value?.modelId) || !this.modelAvailable(value.modelId) || !isOpenAIReasoningEffort(value.modelId,value.effort))
+          return this.json({code:"invalid_settings"},400);
+        reasoning = {modelId:value.modelId,effort:value.effort};
+      }
       let policy: ThinkingPolicy;
       try { policy = body.thinkingPolicy === undefined ? current.thinkingPolicy : thinkingPolicy(body.thinkingPolicy,current.thinkingPolicy); }
       catch { return this.json({code:"invalid_settings"},400); }
       // Omitted fields retain their server values, including thinking-only composer updates.
-      this.sql`UPDATE niao_settings SET modelId = ${modelId}, thinkingEnabled = ${mode === "on" ? 1 : 0},
-        thinkingMode = ${mode}, thinkingPolicy = ${JSON.stringify(policy)} WHERE id = 1`;
+      this.ctx.storage.transactionSync(() => {
+        this.sql`UPDATE niao_settings SET modelId = ${modelId}, journalModelId = ${journalModelId}, thinkingEnabled = ${mode === "on" ? 1 : 0},
+          thinkingMode = ${mode}, thinkingPolicy = ${JSON.stringify(policy)} WHERE id = 1`;
+        if (reasoning)
+          this.sql`INSERT INTO niao_reasoning_settings (modelId,effort) VALUES (${reasoning.modelId},${reasoning.effort})
+            ON CONFLICT(modelId) DO UPDATE SET effort=excluded.effort`;
+      });
       this.publish({type: "settings_updated", settings: this.settingsResponse()});
       return this.json(this.settingsResponse());
     }
@@ -170,6 +205,7 @@ export class NiaoAgent extends Agent<Env> {
     if (request.method !== "GET") return this.json({code: "method_not_allowed"}, 405);
     if (url.pathname.endsWith("/jobs")) return this.json({v:1,epoch:this.settings().epoch,jobs:{...this.jobsSnapshot(),items:this.jobsSnapshot().items.filter(job=>job.sessionId===LEGACY_SESSION).map(({sessionId,...job})=>job)}});
     if (url.pathname.endsWith("/journal-usage")) return this.journalUsageResponse(url);
+    if (url.pathname.endsWith("/openai-usage")) return this.openAIUsageResponse();
     if (url.pathname.endsWith("/usage")) return this.usageResponse();
     if (url.pathname.endsWith("/platform-usage")) {
       let snapshot = await this.platformAnalytics.today();
@@ -250,6 +286,58 @@ export class NiaoAgent extends Agent<Env> {
       local: {...recorded, trackingSince, judge}}, {headers: {"Cache-Control": "no-store"}});
   }
 
+  private async openAIUsageResponse(): Promise<Response> {
+    const now = new Date();
+    const period = tokyoDay(now);
+    const rows = this.sql<OpenAIModelUsage>`
+      SELECT modelId, COALESCE(SUM(inputTokens),0) AS inputTokens, COALESCE(SUM(outputTokens),0) AS outputTokens,
+        COALESCE(SUM(COALESCE(totalTokens,COALESCE(inputTokens,0)+COALESCE(outputTokens,0))),0) AS totalTokens,
+        COUNT(*) AS attempts, SUM(inputTokens IS NULL OR outputTokens IS NULL) AS unmeasuredAttempts
+      FROM niao_usage_attempts WHERE startedAt >= ${period.dayStart} AND startedAt < ${period.dayEnd}
+        AND modelId GLOB 'openai/*' GROUP BY modelId`;
+    const {openAITrackingSince:chatTrackingSince} = this.sql<{openAITrackingSince:string}>`
+      SELECT openAITrackingSince FROM niao_usage_meta WHERE id=1`[0];
+    const reports = this.sql<{id:string}>`SELECT r.id FROM niao_report_usage_sessions r
+      WHERE r.createdAt < ${Date.parse(period.dayEnd)} AND r.expiresAt > ${Date.parse(period.dayStart)}
+        AND EXISTS (SELECT 1 FROM niao_report_jobs j WHERE j.reportSessionId=r.id AND j.modelId GLOB 'openai/*')`;
+    const namespace = this.env.JournalAgent;
+    let journalUnavailableSessions = 0;
+    if (namespace) {
+      // Only query sessions known to have accepted OpenAI jobs. Bound concurrent RPCs.
+      const batchSize = 5;
+      for (let offset = 0; offset < reports.length; offset += batchSize) {
+        const results = await Promise.allSettled(reports.slice(offset, offset + batchSize).map(async report => {
+          const agent = await getAgentByName(namespace, report.id);
+          return agent.openAIUsage(period.dayStart, period.dayEnd);
+        }));
+        for (const result of results) {
+          if (result.status === "fulfilled") rows.push(...result.value);
+          else journalUnavailableSessions++;
+        }
+      }
+    } else journalUnavailableSessions = reports.length;
+
+    return this.json({v:1, ...period, asOf:now.toISOString(), chatTrackingSince, journalUnavailableSessions,
+      ...summarizeOpenAIUsage(rows)});
+  }
+
+  private startUsageAttempt(modelId?:ModelID) {
+    const id = crypto.randomUUID();
+    this.sql`INSERT INTO niao_usage_attempts (id,startedAt,modelId) VALUES (${id},${new Date().toISOString()},${modelId ?? null})`;
+    return id;
+  }
+
+  private recordUsage(attemptId:string, modelId:ModelID, sample:Record<string,number>) {
+    if (usesOpenAIGateway(modelId)) {
+      const input = tokenCount(sample.prompt_tokens), output = tokenCount(sample.completion_tokens), total = tokenCount(sample.total_tokens);
+      // Usage frames are cumulative for one inference, including any later correction.
+      this.sql`UPDATE niao_usage_attempts SET inputTokens=COALESCE(${input},inputTokens),
+        outputTokens=COALESCE(${output},outputTokens),totalTokens=COALESCE(${total},totalTokens) WHERE id=${attemptId}`;
+    } else if (validNeurons(sample.neurons)) {
+      this.sql`UPDATE niao_usage_attempts SET neurons=${sample.neurons} WHERE id=${attemptId}`;
+    }
+  }
+
   private withThinking(messages: Message[]): Message[] {
     return messages.map(message => {
       if (message.role !== "assistant") return message;
@@ -257,20 +345,26 @@ export class NiaoAgent extends Agent<Env> {
       return rows.length ? {...message,thinking:rows.map(row => ({...row,active:false}))} : message;
     });
   }
-  private settings(): {modelId: ModelID; epoch: number; thinkingMode:ThinkingMode; thinkingPolicy:ThinkingPolicy} {
-    const row = this.sql<{modelId:ModelID;epoch:number;thinkingMode:ThinkingMode;thinkingPolicy:string}>`SELECT modelId, epoch, thinkingMode, thinkingPolicy FROM niao_settings WHERE id = 1`[0];
-    return {...row,epoch:row.epoch,thinkingPolicy:thinkingPolicy(JSON.parse(row.thinkingPolicy))};
+  private settings() {
+    const {effort,...row} = this.sql<{modelId:ModelID;journalModelId:JournalModelID|null;epoch:number;thinkingMode:ThinkingMode;
+      thinkingPolicy:string;effort:string|null}>`SELECT s.modelId, s.journalModelId, s.epoch, s.thinkingMode, s.thinkingPolicy, r.effort
+      FROM niao_settings s LEFT JOIN niao_reasoning_settings r ON r.modelId=s.modelId WHERE s.id=1`[0];
+    const selectedEffort = openAIReasoningEffort(row.modelId,effort);
+    return {...row,journalModelId:row.journalModelId ?? DEFAULT_JOURNAL_MODEL,thinkingPolicy:thinkingPolicy(JSON.parse(row.thinkingPolicy)),
+      reasoning:selectedEffort && this.modelAvailable(row.modelId) ? {modelId:row.modelId,effort:selectedEffort} : undefined};
   }
   private get openAIGatewayId() { return this.env.OPENAI_GATEWAY_ID?.trim() || undefined; }
+  private modelAvailable(modelId:ModelID) { return !usesOpenAIGateway(modelId) || !!this.openAIGatewayId; }
   private settingsResponse() {
     const settings = this.settings();
-    const models = this.openAIGatewayId ? MODELS : MODELS.filter(model => model.id !== OPENAI_BYOK_MODEL);
-    return {v:1,...settings,serverVersion:version,thinkingEnabled:settings.thinkingMode === "on",models};
+    return {v:1,...settings,serverVersion:version,thinkingEnabled:settings.thinkingMode === "on",
+      models:MODELS.filter(model => this.modelAvailable(model.id)),
+      journalModels:JOURNAL_MODELS.filter(model => this.modelAvailable(model.id))};
   }
   private json(data: object, status = 200) { return Response.json(data, {status, headers: {"Cache-Control": "no-store"}}); }
-  protected createModel(modelId: ModelID, thinkingEnabled: boolean, tools: AdditionalTool[] = []): ChatModel {
+  protected createModel(modelId: ModelID, thinkingEnabled: boolean, tools: AdditionalTool[] = [], effort?:OpenAIReasoningEffort): ChatModel {
     return new WorkersAIModel(this.env.AI, modelId, rubyExecutor(this.env.RUBY_RUNNER), thinkingEnabled,
-      [...miscTools(this.env.TOOLS_MISC), ...tools], {openAIGatewayId: this.openAIGatewayId});
+      [...miscTools(this.env.TOOLS_MISC), ...tools], {openAIGatewayId: this.openAIGatewayId, openAIReasoningEffort:effort});
   }
   protected createThinkingJudge(): ThinkingJudge { return new ClefThinkingJudge(this.env.AI); }
   async enqueueJournalAgent(input:unknown,requestId:string,epoch:number) {
@@ -304,8 +398,9 @@ export class NiaoAgent extends Agent<Env> {
     const approval=requested ? JSON.stringify(review && !outstanding && !otherTarget
       ? {articleId:review.articleId,expectedUpdatedAt:review.updatedAt} : {}) : null;
     if(!approval)this.sql`DELETE FROM niao_report_reviews WHERE sessionId=${sessionId}`;
-    this.sql`INSERT INTO niao_report_jobs(id,sessionId,epoch,requestId,prompt,reportSessionId,createdAt,expiresAt,status)
-      VALUES (${id},${sessionId},${epoch},${requestId},${data.prompt},${report.id},${now},${report.expiresAt},'pending')`;
+    const {journalModelId} = this.settings();
+    this.sql`INSERT INTO niao_report_jobs(id,sessionId,epoch,requestId,prompt,reportSessionId,createdAt,expiresAt,status,modelId)
+      VALUES (${id},${sessionId},${epoch},${requestId},${data.prompt},${report.id},${now},${report.expiresAt},'pending',${journalModelId})`;
     if(approval){
       this.sql`UPDATE niao_report_jobs SET approval=${approval} WHERE id=${id}`;
       this.sql`UPDATE niao_report_reviews SET approvedJobId=${id} WHERE sessionId=${sessionId}`;
@@ -326,7 +421,7 @@ export class NiaoAgent extends Agent<Env> {
     this.sql`UPDATE niao_report_jobs SET status='queued',dispatchedAt=${now} WHERE id=${id}`;
     try{await this.sendJournalAgentJob(id);}catch{this.sql`UPDATE niao_report_jobs SET status='pending',dispatchedAt=0 WHERE id=${id} AND dispatchedAt=${now}`;}
   }
-  claimJournalAgentJob(id:string):{action:"skip"}|{action:"busy"}|{action:"run";job:ReportJob} {
+  claimJournalAgentJob(id:string):{action:"skip"}|{action:"busy"}|{action:"run";job:ReportJob;openAIGatewayId?:string} {
     const job=this.sql<ReportJob>`SELECT * FROM niao_report_jobs WHERE id=${id}`[0];
     if(!job || ["ready","notified","cancelled"].includes(job.status) || this.session(job.sessionId)?.epoch!==job.epoch)return {action:"skip"};
     if(job.status==='running' && job.dispatchedAt>Date.now()-8*60000)return {action:"busy"};
@@ -334,7 +429,9 @@ export class NiaoAgent extends Agent<Env> {
     const earlier=this.sql`SELECT id FROM niao_report_jobs WHERE reportSessionId=${job.reportSessionId} AND rowid<(SELECT rowid FROM niao_report_jobs WHERE id=${id}) AND status NOT IN ('ready','notified','cancelled') LIMIT 1`;
     if(earlier.length)return {action:"busy"};
     this.sql`UPDATE niao_report_jobs SET status='running',dispatchedAt=${Date.now()} WHERE id=${id}`;
-    this.publishJobs();return {action:"run",job};
+    this.publishJobs();
+    // This RPC is called by the journal Worker. Keep the Gateway ID out of the outbox and queue.
+    return {action:"run",job,openAIGatewayId:job.modelId && usesOpenAIGateway(job.modelId) ? this.openAIGatewayId : undefined};
   }
   journalChatSnapshot(jobId:string,afterSeq=0,limit=50){
     const job=this.sql<ReportJob>`SELECT * FROM niao_report_jobs WHERE id=${jobId}`[0];
@@ -614,9 +711,8 @@ export class NiaoAgent extends Agent<Env> {
       if (!result.ok) text = `依頼された記事を取得できませんでした（${result.error}）。\n\n${job.url}`;
       else if (job.notificationAttempts >= jobLimits.notifications) text = `${fallback}\n\n${result.finalUrl}`;
       else {
-        const attemptId = crypto.randomUUID();
+        const attemptId = this.startUsageAttempt(modelId);
         log("fetch_job.summary_started",{jobId:job.id,model:modelId});
-        this.sql`INSERT INTO niao_usage_attempts (id,startedAt) VALUES (${attemptId},${new Date().toISOString()})`;
         const prompt = this.sql<{content:string}>`SELECT content FROM niao_messages WHERE requestId=${job.requestId} AND role='user'`[0]?.content ?? "";
         const stream = async()=>{
           const messages:ModelMessage[] = [
@@ -626,8 +722,7 @@ export class NiaoAgent extends Agent<Env> {
           for await (const part of this.createNotificationModel(modelId).stream(messages,controller.signal)) {
             controller.signal.throwIfAborted();
             if ("text" in part) { text += part.text; if (text.length > 8000) throw new ChatError("response_too_large"); }
-            if ("usage" in part && validNeurons(part.usage.neurons))
-              this.sql`UPDATE niao_usage_attempts SET neurons=${part.usage.neurons} WHERE id=${attemptId}`;
+            if ("usage" in part) this.recordUsage(attemptId,modelId,part.usage);
           }
         };
         await Promise.race([stream(),new Promise<never>((_,reject)=>{
@@ -709,13 +804,8 @@ export class NiaoAgent extends Agent<Env> {
 
   private async generate(requestId: string,sessionId:string) {
     const epoch=this.session(sessionId)!.epoch;
-    const {modelId, thinkingMode, thinkingPolicy: policy} = this.settings(); // Snapshot policy for the whole turn.
+    const {modelId, thinkingMode, thinkingPolicy: policy, reasoning} = this.settings(); // Snapshot policy for the whole turn.
     const start = Date.now();
-    const startAttempt = () => {
-      const id = crypto.randomUUID();
-      this.sql`INSERT INTO niao_usage_attempts (id, startedAt) VALUES (${id}, ${new Date().toISOString()})`;
-      return id;
-    };
     let attemptId: string;
     log("llm.start", {requestId, model:modelId, thinkingMode});
     const controller = new AbortController();
@@ -746,7 +836,7 @@ export class NiaoAgent extends Agent<Env> {
         let thinkingEnabled = thinkingMode === "on";
         if (thinkingMode === "auto" && supportsThinking(modelId)) {
           const id = this.ctx.storage.transactionSync(() => {
-            const id = startAttempt();
+            const id = this.startUsageAttempt();
             this.sql`INSERT INTO niao_judge_attempts (id) VALUES (${id})`;
             return id;
           });
@@ -762,10 +852,10 @@ export class NiaoAgent extends Agent<Env> {
           thinkingEnabled = decision.enabled;
         }
         controller.signal.throwIfAborted();
-        attemptId = startAttempt();
+        attemptId = this.startUsageAttempt(modelId);
         const turnTools = [...tools,...(this.env.JOURNAL_PROMPTS ? [journalAgentTool(input=>this.enqueueJournalAgent(input,requestId,epoch))] : []),reminderTool((minutes,message)=>this.enqueueReminder(minutes,message,requestId,epoch)),
           ...(this.env.FETCH_JOBS ? [asyncFetchTool(url=>this.enqueueFetchJob(url,requestId,epoch))] : [])];
-        for await (const part of this.createModel(modelId, thinkingEnabled, turnTools).stream(boundedContext(recent), controller.signal)) {
+        for await (const part of this.createModel(modelId, thinkingEnabled, turnTools, reasoning?.effort).stream(boundedContext(recent), controller.signal)) {
           controller.signal.throwIfAborted();
           if ("text" in part) {
             text += part.text;
@@ -781,7 +871,7 @@ export class NiaoAgent extends Agent<Env> {
             segment.text += delta; segment.active = active;
             publishPartial();
           } else if ("inferenceStarted" in part) {
-            attemptId = startAttempt();
+            attemptId = this.startUsageAttempt(modelId);
             usage = {};
           } else if ("toolStatus" in part) {
             const name = part.name ?? "ruby_eval";
@@ -789,11 +879,8 @@ export class NiaoAgent extends Agent<Env> {
             log("tool.execution", {requestId,name,status:part.toolStatus});
           } else if ("usage" in part) {
             usage = {...usage, ...part.usage};
-            if (validNeurons(part.usage.neurons)) {
-              // Never add stream samples: the final aggregate supersedes interim usage.
-              // Save before final message commit, including failed/empty responses.
-              this.sql`UPDATE niao_usage_attempts SET neurons = ${part.usage.neurons} WHERE id = ${attemptId}`;
-            }
+            // Save before final message commit, including failed/empty responses.
+            this.recordUsage(attemptId,modelId,part.usage);
           }
         }
       };

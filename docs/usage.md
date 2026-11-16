@@ -10,6 +10,28 @@ Niao は Cloudflare の公式 GraphQL Analytics API を Worker から呼び、�
 
 Workers／Durable Objectsの統計は[下記](#workersとdurable-objectsの日次利用量)を参照してください。
 
+## OpenAI の日次トークン使用量
+
+macOS／iOS の「利用状況統計 → OpenAI」では、日本時間 0:00 からの入力・出力・合計トークンをモデル別に確認できます。Niao のチャット、バックグラウンド要約、日報を集計します。推論を開始した日で集計し、ツール実行後の追加推論もそれぞれ数えます。[OpenAI の Responses API 使用量](https://developers.openai.com/api/reference/resources/responses/methods/create)
+
+推論レスポンスの使用量を利用するため、追加の API キーやシークレットは不要です。チャットと要約はこの機能の導入後から記録します。日報は保存済みの使用量を読み取ります。トークン数が返らなかった推論や取得できなかった日報セッションは、画面に件数を表示します。
+
+設定済みの `NIAO_TOKEN` で日次集計だけを取得することもできます。
+
+```sh
+curl --fail-with-body -H "Authorization: Bearer $NIAO_TOKEN" \
+  "$NIAO_BACKEND_URL/agents/niao-agent/personal/openai-usage"
+```
+
+レスポンスには集計日 `date`、範囲 `dayStart` / `dayEnd`、総計 `totals`、モデル別 `models`、チャットと要約の記録開始 `chatTrackingSince`、取得できなかった日報セッション数 `journalUnavailableSessions` が含まれます。出力トークンには API が計上した推論トークンも含まれます。
+
+デプロイは日報 Worker、メイン Worker の順です。統計画面を使うにはアプリも更新します。
+
+```sh
+npm run deploy -w @niao/journal-agent
+npm run deploy -w @niao/worker
+```
+
 ## 1. Analytics 読み取り用トークンを作る
 
 Cloudflare ダッシュボードの **Account API tokens** で **Create Token → Custom token / Get started** を選びます。

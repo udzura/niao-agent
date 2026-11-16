@@ -6,6 +6,14 @@
 
 現在thinkingを生成できるモデルはGemma 4・Qwen3 30B A3B・Qwen 3.8 27Bです。GLM・Llama・Graniteでは設定値を保持しますが、thinkingとjudgeの呼び出しは無効です。対応モデルへ戻すと保存値が適用されます。
 
+## GPT-6 系の Reasoning
+
+チャットで GPT-6 Luna・GPT-6.1 Terra・GPT-6.1 Sol を選ぶと、入力欄の同じスライダーから Responses API の `reasoning.effort` を選べます。Luna と Terra は `none`（OFF）、`low`、`medium`、`high`、`xhigh`、`max` に対応し、Sol は `low` から始まります。[OpenAI の reasoning effort](https://developers.openai.com/api/docs/guides/reasoning#reasoning-effort) · [Sol のモデル仕様](https://developers.openai.com/api/docs/models/gpt-6.1-sol)
+
+初回の選択値は Luna・Terra が OFF、Sol が Low です。選択はチャットモデルごとに保存され、次のターンからそのターン中のツール呼び出し後の推論にも適用されます。推論と回答を合わせた1回の上限は、OFF・Low が4,096、Medium が8,192、High が16,384、XHigh・Max が25,000トークンです。チャットの1ターンの期限は90秒です。
+
+認証付き `PUT /settings` に `{"reasoning":{"modelId":"openai/gpt-6.1-sol","effort":"high"}}` を送ると、そのチャットモデルの設定を保存できます。モデル一覧の `reasoningEfforts` で選択肢、設定レスポンスの `reasoning` で選択中モデルの値を確認できます。
+
 ## 判定と調整
 
 自動では、ターン開始時に `@cf/cloudflare/clef-flash` を1回呼びます。入力は最新リクエストと直近の通常会話（最大5メッセージ、12,000 UTF-16コード単位）です。ユーザー入力を `state` に置き、信頼する判定指示を `questions.needs_thinking` に分離します。質問型は `noul`（Yesの確率）です。[Clef-flash API](https://developers.cloudflare.com/workers-ai/models/clef-flash/)

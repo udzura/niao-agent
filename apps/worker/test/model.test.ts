@@ -105,6 +105,48 @@ describe('bounded native tool calling', () => {
   });
 });
 
+it.each(["openai/gpt-6-luna", "openai/gpt-6.1-terra", "openai/gpt-6.1-sol"] as const)(
+  "streams %s Responses calls through the existing Ruby tool loop", async modelId => {
+    const frames = (...events: unknown[]) => stream(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(""));
+    const complete = (output: unknown[]) => ({type:"response.completed",response:{output,usage:{input_tokens:5,output_tokens:2,total_tokens:7}}});
+    const reasoning = {type:"reasoning",id:"rs_item",summary:[],encrypted_content:"opaque-reasoning"};
+    const sol = modelId === "openai/gpt-6.1-sol";
+    let rounds = 0;
+    const ai = {run: async (selected: string, input: any, options: AiOptions) => {
+      expect(selected).toBe(modelId);
+      expect(options).toMatchObject({gateway:{id:"test-gateway",skipCache:true},extraHeaders:{"cf-aig-no-wholesale":"true"}});
+      expect(input).toMatchObject({stream:true,store:false,reasoning:{effort:sol ? "low" : "none"},include:["reasoning.encrypted_content"],
+        tools:[{type:"function",name:"ruby_eval",strict:false}],parallel_tool_calls:false});
+      expect(input.messages).toBeUndefined();
+      expect(input.tools[0].function).toBeUndefined();
+      if (++rounds === 1) return frames(complete([
+        ...(sol ? [reasoning] : []),
+        {type:"function_call",id:"fc_item",call_id:"call_ruby",name:"ruby_eval",arguments:'{"code":"6*7"}'},
+      ]));
+      expect(input.input).toEqual([{role:"user",content:"計算して"}, ...(sol ? [reasoning] : []),
+        {type:"function_call",call_id:"call_ruby",name:"ruby_eval",arguments:'{"code":"6*7"}'},
+        {type:"function_call_output",call_id:"call_ruby",output:'{"ok":true,"value":"42"}'}]);
+      return frames({type:"response.output_text.delta",delta:"42です。"},complete([]));
+    }} as unknown as Ai;
+    const model = new WorkersAIModel(ai,modelId,async code => {
+      expect(code).toBe("6*7"); return {ok:true,value:"42"};
+    },false,[],{openAIGatewayId:"test-gateway"});
+    const events = [];
+    for await (const event of model.stream([{role:"user",content:"計算して"}],new AbortController().signal)) events.push(event);
+    expect(rounds).toBe(2);
+    expect(events.filter(event => "usage" in event)).toEqual(Array(2).fill({usage:{prompt_tokens:5,completion_tokens:2,total_tokens:7}}));
+    expect(events).toContainEqual({text:"42です。"});
+    expect(JSON.stringify(events)).not.toContain(reasoning.encrypted_content);
+  },
+);
+
+it("does not execute a Responses tool call before a successful terminal event", async () => {
+  const ai = {run: async () => stream('data: {"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_ruby","name":"ruby_eval","arguments":"{}"}}\n\ndata: [DONE]\n\n')} as unknown as Ai;
+  const model = new WorkersAIModel(ai,"openai/gpt-6.1-terra",async () => {throw Error("tool executed");},false,[],{openAIGatewayId:"gateway"});
+  await expect((async () => {for await (const _ of model.stream([],new AbortController().signal)) { /* consume */ }})())
+    .rejects.toThrow("incomplete_ai_stream");
+});
+
 it('executes the advertised tool through the real static Runner RPC and returns its value to the model', async () => {
   const {env} = await import('cloudflare:test');
   const {rubyExecutor} = await import('../src/ruby/tool');

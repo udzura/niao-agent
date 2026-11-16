@@ -8,13 +8,19 @@ final class ThinkingTests: XCTestCase {
         XCTAssertNil(legacy.serverVersion)
         XCTAssertFalse(legacy.thinkingEnabled)
         XCTAssertNil(legacy.models[0].supportsThinking)
-        let current = #"{"v":1,"epoch":2,"modelId":"gemma","thinkingEnabled":true,"serverVersion":"0.1.20261101","models":[{"id":"gemma","name":"Gemma","supportsThinking":true},{"id":"glm","name":"GLM","supportsThinking":false}]}"#
+        XCTAssertNil(legacy.journalModelId)
+        XCTAssertTrue(legacy.journalModels.isEmpty)
+        let current = #"{"v":1,"epoch":2,"modelId":"gemma","thinkingEnabled":true,"serverVersion":"0.1.20261101","models":[{"id":"gemma","name":"Gemma","supportsThinking":true},{"id":"glm","name":"GLM","supportsThinking":false}],"journalModelId":"luna","journalModels":[{"id":"luna","name":"Luna"}]}"#
         let settings = try JSONDecoder().decode(AgentSettings.self, from: Data(current.utf8))
         XCTAssertEqual(settings.serverVersion, "0.1.20261101")
         XCTAssertTrue(settings.thinkingEnabled)
         XCTAssertEqual(settings.models.map(\.supportsThinking), [true,false])
         let event = try JSONDecoder().decode(ServerEvent.self, from: Data("{\"v\":1,\"type\":\"settings_updated\",\"settings\":\(current)}".utf8))
         XCTAssertEqual(event.settings?.thinkingEnabled, true)
+        XCTAssertEqual(event.settings?.journalModelId, "luna")
+        XCTAssertEqual(event.settings?.journalModels.map(\.id), ["luna"])
+        let update = try JSONEncoder().encode(ModelSettingsUpdate(journalModelId: "luna"))
+        XCTAssertEqual(try JSONDecoder().decode([String:String].self, from: update), ["journalModelId":"luna"])
     }
     func testModelSettingsRequestEncodesEachThinkingModeWithoutALegacyBoolean() throws {
         for mode in ThinkingMode.allCases {
@@ -24,6 +30,15 @@ final class ThinkingTests: XCTestCase {
             XCTAssertEqual(body["thinkingMode"] as? String, mode.rawValue)
             XCTAssertNil(body["thinkingEnabled"])
         }
+    }
+    func testReasoningUsesModelOptionsAndUpdatesOnlyTheNamedModel() throws {
+        let raw = #"{"v":1,"epoch":0,"modelId":"sol","thinkingMode":"off","reasoning":{"modelId":"sol","effort":"xhigh"},"models":[{"id":"sol","name":"Sol","supportsThinking":false,"reasoningEfforts":["low","medium","high","xhigh","max"]}]}"#
+        let settings = try JSONDecoder().decode(AgentSettings.self, from: Data(raw.utf8))
+        XCTAssertEqual(settings.selectedModel?.reasoningEfforts, [.low,.medium,.high,.xhigh,.max])
+        XCTAssertEqual(settings.thinkingControlLabel, "XHigh")
+        XCTAssertTrue(settings.thinkingControlActive)
+        let body = try JSONEncoder().encode(ModelSettingsUpdate(reasoning:ReasoningSetting(modelId:"sol",effort:.max)))
+        XCTAssertEqual(try JSONDecoder().decode([String:[String:String]].self,from:body), ["reasoning":["modelId":"sol","effort":"max"]])
     }
     func testAutomaticModeSurvivesSettingsAndHistoryDecoding() throws {
         let settings = #"{"v":1,"epoch":0,"modelId":"gemma","thinkingMode":"auto","thinkingEnabled":false,"models":[]}"#

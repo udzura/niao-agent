@@ -1,4 +1,5 @@
 import {z} from "zod";
+import type {JournalModelID} from "./model";
 import type {AdditionalTool} from "./past-logs";
 export const reportLifetime = 12 * 3600000;
 export const reportInput = z.strictObject({prompt:z.string().trim().min(1).max(8000), reportSessionId:z.uuid().optional()});
@@ -26,6 +27,7 @@ export interface ReportJob {
   id:string; sessionId:string; epoch:number; requestId:string; prompt:string; reportSessionId:string;
   createdAt:number; expiresAt:number; status:string; dispatchedAt:number; result:string|null;
   approval?:string|null;
+  modelId?:JournalModelID|null;
 }
 export function journalAgentTool(enqueue:(input:z.infer<typeof reportInput>)=>Promise<unknown>):AdditionalTool {
   const {$schema,...parameters}=z.toJSONSchema(reportInput);

@@ -210,6 +210,36 @@ func explanation(_ code: String, details: AIErrorDetails? = nil) -> String {
     }
 }
 
+struct OpenAIUsageSnapshot: Decodable {
+    struct Totals: Decodable {
+        let inputTokens: Int
+        let outputTokens: Int
+        let totalTokens: Int
+        let attempts: Int
+        let unmeasuredAttempts: Int
+    }
+    struct ModelUsage: Decodable, Identifiable {
+        let modelId: String
+        let inputTokens: Int
+        let outputTokens: Int
+        let totalTokens: Int
+        var id: String { modelId }
+    }
+    let v: Int
+    let date: String
+    let dayStart: String
+    let dayEnd: String
+    let asOf: String
+    let chatTrackingSince: String
+    let journalUnavailableSessions: Int
+    let totals: Totals
+    let models: [ModelUsage]
+    func isCurrent(at now: Date) -> Bool {
+        guard let start = UsageSnapshot.parseDate(dayStart), let end = UsageSnapshot.parseDate(dayEnd) else { return false }
+        return start <= now && now < end
+    }
+}
+
 struct UsageSnapshot: Decodable {
     struct Account: Decodable {
         let status: String
@@ -351,38 +381,67 @@ enum ThinkingChoice: String, CaseIterable, Identifiable {
         return ModelSettingsUpdate(thinkingMode: self == .on ? .on : self == .off ? .off : .automatic)
     }
 }
+enum ReasoningEffort: String, Codable {
+    case none, low, medium, high, xhigh, max
+
+    var label: String {
+        switch self {
+        case .none: "OFF"
+        case .xhigh: "XHigh"
+        default: rawValue.capitalized
+        }
+    }
+}
+struct ReasoningSetting: Codable, Equatable {
+    let modelId: String
+    let effort: ReasoningEffort
+}
 struct AgentSettings: Decodable {
     let serverVersion: String?
     struct Model: Decodable, Identifiable {
         let id: String
         let name: String
         let supportsThinking: Bool?
+        let reasoningEfforts: [ReasoningEffort]?
     }
     let v: Int
     let modelId: String
+    let journalModelId: String?
     let thinkingMode: ThinkingMode
     let thinkingPolicy: ThinkingPolicy
+    let reasoning: ReasoningSetting?
     var thinkingChoice: ThinkingChoice { .current(mode: thinkingMode, policy: thinkingPolicy) }
     var thinkingEnabled: Bool { thinkingMode == .on }
+    var thinkingControlLabel: String { reasoning?.effort.label ?? thinkingChoice.label }
+    var thinkingControlActive: Bool { reasoning.map { $0.effort != ReasoningEffort.none } ?? (thinkingChoice != .off) }
     let epoch: Int
     let models: [Model]
-    private enum CodingKeys: String, CodingKey { case v, modelId, thinkingMode, thinkingPolicy, thinkingEnabled, epoch, models, serverVersion }
+    var selectedModel: Model? { models.first { $0.id == modelId } }
+    let journalModels: [Model]
+    private enum CodingKeys: String, CodingKey {
+        case v, modelId, journalModelId, thinkingMode, thinkingPolicy, thinkingEnabled, reasoning, epoch, models, journalModels, serverVersion
+    }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         serverVersion = try values.decodeIfPresent(String.self, forKey: .serverVersion)
         v = try values.decode(Int.self, forKey: .v)
         modelId = try values.decode(String.self, forKey: .modelId)
+        journalModelId = try values.decodeIfPresent(String.self, forKey: .journalModelId)
         if let mode = try values.decodeIfPresent(ThinkingMode.self, forKey: .thinkingMode) { thinkingMode = mode }
         else { thinkingMode = try values.decodeIfPresent(Bool.self, forKey: .thinkingEnabled) == true ? .on : .off }
         thinkingPolicy = try values.decodeIfPresent(ThinkingPolicy.self, forKey: .thinkingPolicy) ?? .standard
+        reasoning = try values.decodeIfPresent(ReasoningSetting.self, forKey: .reasoning)
         epoch = try values.decode(Int.self, forKey: .epoch)
         models = try values.decode([Model].self, forKey: .models)
+        journalModels = try values.decodeIfPresent([Model].self, forKey: .journalModels) ?? []
     }
 }
 struct ModelSettingsUpdate: Encodable {
     var modelId: String? = nil
+    var journalModelId: String? = nil
     var thinkingMode: ThinkingMode? = nil
     var thinkingPolicy: ThinkingPolicy? = nil
+    var reasoning: ReasoningSetting? = nil
 }
 struct ClearHistoryResult: Decodable { let v: Int; let epoch: Int }
 

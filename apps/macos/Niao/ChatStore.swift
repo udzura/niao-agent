@@ -50,6 +50,10 @@ final class ChatStore: ObservableObject {
     @Published var usageError: String?
     @Published var usageLoading = false
     private var usageTask: Task<Void, Never>?
+    @Published var openAIUsage: OpenAIUsageSnapshot?
+    @Published var openAIUsageError: String?
+    @Published var openAIUsageLoading = false
+    private var openAIUsageTask: Task<Void, Never>?
     @Published var platformUsage: PlatformUsageSnapshot?
     @Published var platformUsageError: String?
     @Published var platformUsageLoading = false
@@ -149,6 +153,7 @@ final class ChatStore: ObservableObject {
         sessionCatalog = nil; selectedSessionID = nil; drafts = [:]; unreadSessions = []; lastRead = UserDefaults.standard.dictionary(forKey: "sessionLastRead." + valid) as? [String: String] ?? [:]
         toolToast.clear()
         usage = nil; usageError = nil; usageRefreshAt = nil
+        openAIUsage = nil; openAIUsageError = nil
         platformUsage = nil; platformUsageError = nil
         journalUsage = nil; journalUsageError = nil
         closeJournalUsageDetail()
@@ -166,6 +171,7 @@ final class ChatStore: ObservableObject {
         controlBusy = false
         runningToolName = nil
         usageTask?.cancel(); usageTask = nil; usageLoading = false
+        openAIUsageTask?.cancel(); openAIUsageTask = nil; openAIUsageLoading = false
         platformUsageTask?.cancel(); platformUsageTask = nil; platformUsageLoading = false
         journalUsageTask?.cancel(); journalUsageTask = nil; journalUsageLoading = false
         journalUsageDetailTask?.cancel(); journalUsageDetailTask = nil; journalUsageDetailLoading = false
@@ -584,12 +590,15 @@ final class ChatStore: ObservableObject {
         if let pending = outbox, (pending.epoch ?? 0) != incoming { clearOutbox() }
         return true
     }
-    func updateModelSettings(_ modelId: String) {
-        updateAgentSettings(ModelSettingsUpdate(modelId: modelId))
+    func updateModelSettings(_ modelId: String?, journalModelId: String?) {
+        updateAgentSettings(ModelSettingsUpdate(modelId: modelId, journalModelId: journalModelId))
     }
     func updateThinking(_ choice: ThinkingChoice) {
         guard let settings = agentSettings, choice != .custom else { return }
         updateAgentSettings(choice.update(using: settings.thinkingPolicy))
+    }
+    func updateReasoning(_ setting: ReasoningSetting) {
+        updateAgentSettings(ModelSettingsUpdate(reasoning: setting))
     }
     private func updateAgentSettings(_ update: ModelSettingsUpdate) {
         guard connected, !controlBusy, let backend else { return }
@@ -673,6 +682,29 @@ final class ChatStore: ObservableObject {
                 if case NiaoError.http(404) = error {
                     platformUsageError = "Workers統計に対応したバックエンドをデプロイしてください。"
                 } else { platformUsageError = "Workersの使用量を更新できませんでした。" }
+            }
+        }
+    }
+    func refreshOpenAIUsage() {
+        guard openAIUsageTask == nil, let backend else { return }
+        let id = generation
+        openAIUsageLoading = true
+        openAIUsageTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if generation == id { openAIUsageTask = nil; openAIUsageLoading = false }
+            }
+            do {
+                let snapshot = try await backend.openAIUsage()
+                guard generation == id, !Task.isCancelled else { return }
+                openAIUsage = snapshot; openAIUsageError = nil
+            } catch {
+                guard generation == id, !Task.isCancelled else { return }
+                if case NiaoError.http(404) = error {
+                    openAIUsageError = "OpenAI の利用状況に対応したバックエンドをデプロイしてください。"
+                } else {
+                    openAIUsageError = "OpenAI の使用量を更新できませんでした。"
+                }
             }
         }
     }

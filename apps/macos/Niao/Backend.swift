@@ -97,6 +97,11 @@ final class Backend {
         guard snapshot.v == 1 else { throw NiaoError.protocolMismatch }
         return snapshot
     }
+    func openAIUsage() async throws -> OpenAIUsageSnapshot {
+        let snapshot: OpenAIUsageSnapshot = try await controlRequest(path: "/agents/niao-agent/personal/openai-usage", method: "GET")
+        guard snapshot.v == 1 else { throw NiaoError.protocolMismatch }
+        return snapshot
+    }
     private func journalUsagePath(target: JournalUsageTarget? = nil, before: Int? = nil) -> String {
         var query = URLComponents()
         query.queryItems = (target.map { [$0.queryItem] } ?? []) + (before.map { [URLQueryItem(name: "before", value: String($0))] } ?? [])

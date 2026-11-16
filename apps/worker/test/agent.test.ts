@@ -75,7 +75,7 @@ it("returns redacted provider details over WebSocket and restores them after evi
 
 describe("authenticated Worker boundary", () => {
   it("rejects unauthenticated HTTP and upgrades before allocating an agent", async () => {
-    for (const path of ["/health", "/agents/niao-agent/personal/usage", "/agents/niao-agent/personal/platform-usage", "/agents/niao-agent/personal/history", "/agents/niao-agent/personal"]) {
+    for (const path of ["/health", "/agents/niao-agent/personal/usage", "/agents/niao-agent/personal/openai-usage", "/agents/niao-agent/personal/platform-usage", "/agents/niao-agent/personal/history", "/agents/niao-agent/personal"]) {
       expect((await SELF.fetch(`https://test${path}`)).status).toBe(401);
       expect((await SELF.fetch(`https://test${path}`, {headers: {Upgrade: "websocket"}})).status).toBe(401);
     }
@@ -275,14 +275,17 @@ describe("model settings and conversation cleanup", () => {
     expect((await SELF.fetch(`${base}/settings`, {method: "PUT", body: "{}"})).status).toBe(401);
     expect((await SELF.fetch(`${base}/history`, {method: "DELETE"})).status).toBe(401);
     expect((await put("@cf/not-a-chat-model" )).status).toBe(400);
-    const openAI = await put("openai/gpt-4.1-mini");
-    expect(openAI.status).toBe(400);
-    expect(await openAI.json()).toEqual({code:"unsupported_model"});
+    for (const modelId of ["openai/gpt-4.1-mini", "openai/gpt-6-luna", "openai/gpt-6.1-terra", "openai/gpt-6.1-sol"]) {
+      expect(await settingsUpdate({modelId})).toEqual({status:400,body:{code:"unsupported_model"}});
+      expect(await settingsUpdate({journalModelId:modelId})).toEqual({status:400,body:{code:"unsupported_model"}});
+    }
     expect((await SELF.fetch(`${base}/settings`, {method: "PUT", headers: {...headers, "Content-Type": "application/json"}, body: "null"})).status).toBe(400);
     expect((await SELF.fetch(`${base}/history`, {method: "DELETE", headers})).status).toBe(428);
     const settings = await (await SELF.fetch(`${base}/settings`, {headers})).json<any>();
     expect(settings.serverVersion).toBe(version);
     expect(settings.modelId).toBe(gemma); expect(settings.models.map((x: any) => x.id)).toEqual([gemma, glm, "@cf/ibm-granite/granite-4.0-h-micro", "@cf/meta/llama-3.3-70b-instruct-fp8-fast", "@cf/meta/llama-4-scout-17b-16e-instruct", "@cf/qwen/qwen3-30b-a3b-fp8", "@cf/qwen/qwen3.8-27b"]);
+    expect(settings.journalModelId).toBe(gemma);
+    expect(settings.journalModels.map((model: {id:string}) => model.id)).toEqual([gemma]);
   });
   it("fails a saved OpenAI selection when its gateway secret is removed", async () => {
     const selected = "openai/gpt-4.1-mini";
@@ -300,6 +303,56 @@ describe("model settings and conversation cleanup", () => {
       code: "ai_unavailable", details: {message: "OPENAI_GATEWAY_ID is required for this model."},
     });
     expect((await put(gemma)).status).toBe(200);
+  });
+  it("saves reasoning per model and snapshots the selected effort across a tool round", async () => {
+    const sol = "openai/gpt-6.1-sol", luna = "openai/gpt-6-luna";
+    const reasoning = (modelId:string,effort:string) => ({modelId,effort});
+    const gatewayId = "test-reasoning-gateway";
+    const selected = await stub();
+    await runInDurableObject(selected, (agent:NiaoAgent) => {
+      const a = agent as any;
+      Object.defineProperty(a,"openAIGatewayId",{value:gatewayId});
+      a.createThinkingJudge = () => { throw Error("Unexpected Thinking judge"); };
+      const opaque = "a".repeat(300_000);
+      let round = 0;
+      a.env.AI = {run:async (model:string,input:any) => {
+        expect(model).toBe(sol);
+        expect(input).toMatchObject({reasoning:{effort:"xhigh"},max_output_tokens:25000});
+        const encode = (event:unknown) => `data: ${JSON.stringify(event)}\n\n`;
+        const completed = (output:unknown[]) => encode({type:"response.completed",response:{output}});
+        let frames: string;
+        if (++round === 1) {
+          agent.sql`UPDATE niao_reasoning_settings SET effort='low' WHERE modelId=${sol}`;
+          frames = completed([{type:"reasoning",id:"rs_xhigh",encrypted_content:opaque},
+            {type:"function_call",call_id:"call_calc",name:"ruby_eval",arguments:'{"code":"6 * 7"}'}]);
+        } else {
+          expect(input.input.find((item: {type:string}) => item.type === "reasoning")?.encrypted_content.length).toBe(opaque.length);
+          expect(input.input.at(-1)).toMatchObject({type:"function_call_output",call_id:"call_calc"});
+          expect(JSON.parse(input.input.at(-1).output)).toMatchObject({ok:true,value:"42"});
+          frames = encode({type:"response.output_text.delta",delta:"42"}) + completed([]);
+        }
+        return new ReadableStream({start(controller) {
+          controller.enqueue(new TextEncoder().encode(frames)); controller.close();
+        }});
+      }};
+    });
+    expect(await settingsUpdate({modelId:sol,reasoning:reasoning(sol,"none")})).toEqual({status:400,body:{code:"invalid_settings"}});
+    expect((await settingsUpdate({modelId:sol,thinkingMode:"auto"})).body).toMatchObject({reasoning:reasoning(sol,"low"),
+      models:expect.arrayContaining([expect.objectContaining({id:sol,reasoningEfforts:["low","medium","high","xhigh","max"]})])});
+    expect((await settingsUpdate({reasoning:reasoning(luna,"medium")})).body).toMatchObject({modelId:sol,reasoning:reasoning(sol,"low")});
+    expect((await settingsUpdate({reasoning:reasoning(sol,"xhigh")})).body).toMatchObject({reasoning:reasoning(sol,"xhigh")});
+    const client = await connect(); send(client.ws,crypto.randomUUID());
+    expect((await client.until(e => e.type === "committed")).messages[1].content).toBe("42");
+    expect(client.events.filter(e => e.type === "tool_status")).toHaveLength(2);
+    expect((await settingsUpdate({modelId:luna})).body).toMatchObject({reasoning:reasoning(luna,"medium")});
+
+    client.ws.close(); await evictDurableObject(selected,{webSockets:"close"});
+    await runInDurableObject(selected, (agent:NiaoAgent) => {
+      Object.defineProperty(agent,"openAIGatewayId",{value:gatewayId});
+    });
+    expect((await (await SELF.fetch(`${base}/settings`,{headers})).json<any>()).reasoning).toEqual(reasoning(luna,"medium"));
+    expect((await settingsUpdate({modelId:gemma})).body.reasoning).toBeUndefined();
+    expect((await settingsUpdate({modelId:sol})).body).toMatchObject({reasoning:reasoning(sol,"low"),thinkingMode:"auto"});
   });
   it.each([glm,"@cf/meta/llama-3.3-70b-instruct-fp8-fast","@cf/ibm-granite/granite-4.0-h-micro", "@cf/meta/llama-4-scout-17b-16e-instruct", "@cf/qwen/qwen3-30b-a3b-fp8"])("persists %s across eviction and uses it for inference", async selected => {
     const updated = await put(selected);
@@ -506,7 +559,7 @@ describe("persistent chat using the real Agent and SQLite runtime", () => {
     const recovered = await usage();
     expect(recovered.local).toMatchObject({neurons: 5, attempts: 3, unmeasuredAttempts: 1, trackingSince: first.local.trackingSince});
     await runInDurableObject(await stub(), (agent: NiaoAgent) => {
-      agent.sql`INSERT INTO niao_usage_attempts VALUES ('old', '2000-01-01T12:00:00.000Z', 999)`;
+      agent.sql`INSERT INTO niao_usage_attempts (id,startedAt,neurons) VALUES ('old', '2000-01-01T12:00:00.000Z', 999)`;
     });
     expect((await usage()).local.neurons).toBe(5);
     const response = await SELF.fetch(`${base}/usage`, {headers});
@@ -526,6 +579,45 @@ describe("persistent chat using the real Agent and SQLite runtime", () => {
     expect(last.messages).toHaveLength(5); expect(last.hasMore).toBe(false);
     expect(new Set([...first.messages, ...last.messages].map(m => m.seq)).size).toBe(105);
   });
+});
+
+it("counts the latest OpenAI token samples, preserves partial usage, and uses Tokyo day boundaries", async () => {
+  const modelId = "openai/gpt-6-luna";
+  await runInDurableObject(await stub(), (agent: NiaoAgent) => {
+    const a = agent as any;
+    a.env.OPENAI_GATEWAY_ID = "test-gateway";
+    a.createModel = () => ({async *stream() {
+      yield {usage:{prompt_tokens:10,completion_tokens:2,total_tokens:12}};
+      yield {usage:{prompt_tokens:12,completion_tokens:4,total_tokens:16}};
+      yield {inferenceStarted:true};
+      yield {usage:{prompt_tokens:4,completion_tokens:NaN,total_tokens:-1}};
+      yield {text:"done"};
+    }});
+  });
+  expect((await settingsUpdate({modelId})).status).toBe(200);
+  const client = await connect(); send(client.ws,crypto.randomUUID());
+  await client.until(e => e.type === "committed");
+
+  const path = `${base}/openai-usage`;
+  const response = await SELF.fetch(path,{headers});
+  expect(response.status).toBe(200);
+  expect(response.headers.get("Cache-Control")).toBe("no-store");
+  expect((await SELF.fetch(path,{method:"POST",headers})).status).toBe(405);
+  const snapshot = await response.json<any>();
+  expect(snapshot.dayStart).toContain("T15:00:00.000Z");
+  expect(snapshot.date).toBe(snapshot.dayEnd.slice(0,10));
+  expect(snapshot.totals).toEqual({inputTokens:16,outputTokens:4,totalTokens:20,attempts:2,unmeasuredAttempts:1});
+  await runInDurableObject(await stub(), (agent:NiaoAgent) => {
+    const before = new Date(Date.parse(snapshot.dayStart)-1).toISOString();
+    agent.sql`INSERT INTO niao_usage_attempts(id,startedAt,modelId,inputTokens,outputTokens,totalTokens)
+      VALUES ('before',${before},${modelId},50,50,100), ('after',${snapshot.dayEnd},${modelId},50,50,100),
+      ('exact',${snapshot.dayStart},${modelId},2,3,NULL)`;
+  });
+  client.ws.close(); await evictDurableObject(await stub(), {webSockets:"close"});
+  const daily = await (await SELF.fetch(path,{headers})).json<any>();
+  expect(daily.totals).toEqual({inputTokens:18,outputTokens:7,totalTokens:25,attempts:3,unmeasuredAttempts:1});
+  expect(daily.models).toEqual([{modelId,...daily.totals}]);
+  expect(daily.chatTrackingSince).toBe(snapshot.chatTrackingSince);
 });
 
 it('accounts separately for each model invocation around a tool call', async () => {

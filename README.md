@@ -135,7 +135,7 @@ open apps/macos/build/Build/Products/Debug/Niao.app
 
 認証付きAPIからも操作できます。具体例と注意点は [モデル設定・履歴削除API](docs/chat-controls.md) を参照してください。
 
-### GPT-4.1 mini を AI Gateway 経由で使う
+### OpenAI モデルを AI Gateway 経由で使う
 
 Worker と同じ Cloudflare アカウントの認証付き AI Gateway で、**Provider Keys** に OpenAI API キーを `default` エイリアスで登録します。Worker には Gateway ID をシークレットとして設定します。ローカル開発では `apps/worker/.dev.vars` の `OPENAI_GATEWAY_ID` に設定します。[Cloudflare の BYOK 設定](https://developers.cloudflare.com/ai-gateway/configuration/bring-your-own-keys/)
 
@@ -144,7 +144,14 @@ cd apps/worker
 npx wrangler secret put OPENAI_GATEWAY_ID
 ```
 
-シークレットを設定すると、モデルの選択肢に `GPT-4.1 mini` が表示されます。このモデルを選ぶと、チャットの応答とバックグラウンドの取得結果の要約に Gateway の OpenAI キーを使います。OpenAI へのリクエストには Unified Billing へのフォールバックを無効にする `cf-aig-no-wholesale` ヘッダーを付けます。[Cloudflare の課金設定](https://developers.cloudflare.com/ai-gateway/features/unified-billing/#prevent-unified-billing-fallback-for-byok-third-party-providers)
+シークレットを設定すると、チャットで GPT-4.1 mini・GPT-6 Luna・GPT-6.1 Terra・GPT-6.1 Sol を選べます。日報エージェントでは既定の Gemma 4 と GPT-6 系の3モデルから独立して選べます。OpenAI へのリクエストには Unified Billing へのフォールバックを無効にする `cf-aig-no-wholesale` ヘッダーを付けます。[Cloudflare の課金設定](https://developers.cloudflare.com/ai-gateway/features/unified-billing/#prevent-unified-billing-fallback-for-byok-third-party-providers)
+
+既存環境では、日報 Worker、メイン Worker の順で更新します。日報のモデルは、更新した macOS／iOS アプリの設定画面か設定 API で変更できます。[モデル設定 API](docs/chat-controls.md)
+
+```sh
+npm run deploy -w @niao/journal-agent
+npm run deploy -w @niao/worker
+```
 
 ## KeychainアクセスとTouch ID
 
@@ -210,6 +217,8 @@ curl -H "Authorization: Bearer $NIAO_TOKEN" "$NIAO_BACKEND_URL/health"
 Mac版は自身の開発TeamによるApple Development署名を使用します。初回のCLIビルドでは`npm run build:macos -- -allowProvisioningUpdates`でプロファイルの取得・作成を許可できます。配布する場合はDeveloper ID署名とnotarization、Keychain用プロファイルを別途準備してください。
 
 ## 日次ニューロン使用量を表示する
+
+OpenAI モデルの日次トークンは「利用状況統計 → OpenAI」で確認できます。[OpenAI の日次トークン使用量](docs/usage.md#openai-の日次トークン使用量)
 
 Cloudflare の **Account → Account Analytics → Read** 権限を持つ専用 API トークンを作成し、Worker に `CF_ACCOUNT_ID` と `CF_ANALYTICS_TOKEN` を設定すると、アカウント全体の使用量を取得します。アプリ側の `NIAO_TOKEN` はそのまま使用します。
 

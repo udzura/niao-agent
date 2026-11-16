@@ -40,6 +40,17 @@ final class NiaoCoreTests: XCTestCase {
         XCTAssertEqual(account.displayedNeurons, 23.35)
     }
 
+    func testOpenAIUsageDecodesTokyoPeriodAndModelTotals() throws {
+        let raw = #"{"v":1,"date":"2026-11-16","dayStart":"2026-11-15T15:00:00.000Z","dayEnd":"2026-11-16T15:00:00.000Z","asOf":"2026-11-16T10:00:00.000Z","chatTrackingSince":"2026-11-16T09:00:00.000Z","journalUnavailableSessions":1,"totals":{"inputTokens":20,"outputTokens":5,"totalTokens":25,"attempts":2,"unmeasuredAttempts":1},"models":[{"modelId":"openai/gpt-6-luna","inputTokens":20,"outputTokens":5,"totalTokens":25}]}"#
+        let usage = try JSONDecoder().decode(OpenAIUsageSnapshot.self, from: Data(raw.utf8))
+        XCTAssertTrue(usage.isCurrent(at: try XCTUnwrap(UsageSnapshot.parseDate(usage.dayStart))))
+        XCTAssertFalse(usage.isCurrent(at: try XCTUnwrap(UsageSnapshot.parseDate(usage.dayEnd))))
+        XCTAssertEqual(usage.totals.totalTokens, 25)
+        XCTAssertEqual(usage.totals.unmeasuredAttempts, 1)
+        XCTAssertEqual(usage.journalUnavailableSessions, 1)
+        XCTAssertEqual(usage.models.first?.id, "openai/gpt-6-luna")
+    }
+
     func testSubmissionPersistsConversationEpoch() throws {
         let submission = Submission(requestId: "r", content: "hello", epoch: 7)
         let data = try JSONEncoder().encode(submission)

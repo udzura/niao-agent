@@ -24,7 +24,9 @@ curl --fail-with-body -X PUT \
 - `@cf/meta/llama-4-scout-17b-16e-instruct`
 - `@cf/qwen/qwen3-30b-a3b-fp8`
 - `@cf/qwen/qwen3.8-27b`
-- `openai/gpt-4.1-mini`（[`OPENAI_GATEWAY_ID` 設定時](../README.md#gpt-41-mini-を-ai-gateway-経由で使う)、Thinking 対象外）
+- [`OPENAI_GATEWAY_ID` 設定時](../README.md#openai-モデルを-ai-gateway-経由で使う)は `openai/gpt-4.1-mini`、`openai/gpt-6-luna`、`openai/gpt-6.1-terra`、`openai/gpt-6.1-sol`。GPT-6 系ではモデルごとに [Reasoning](automatic-thinking.md#gpt-6-系の-reasoning) を指定できます。
+
+日報の選択中モデルは `journalModelId`、候補は `journalModels` に含まれます。候補は既定の Gemma 4 と、Gateway 設定時の GPT-6 Luna・GPT-6.1 Terra・GPT-6.1 Sol です。`PUT /settings` に `{"journalModelId":"openai/gpt-6-luna"}` を送ると、新しく受け付ける日報ジョブに適用されます。受付済みジョブは受付時点のモデルを使います。
 
 モデルとthinking設定はSQLiteに永続化され、次の会話ターンから適用されます。生成中の応答は、ツール実行後の続きも含めて開始時の設定を使い続けます。失敗した応答を再試行する際は新しい設定を使用します。完了済み送信の再送には保存済みの応答を返します。
 

@@ -115,6 +115,9 @@ it.each(["@cf/google/gemma-4-26b-a4b-it", "openai/gpt-4.1-mini"])("uses %s for e
   expect((await history()).messages.map((m:any)=>m.content)).toEqual(["この記事を後で読んでおいて","取得を受け付けました","バックグラウンド取得の要約です"]);
   const usage=await(await SELF.fetch(`${base}/usage`,{headers})).json<any>();
   expect(usage.local).toMatchObject({attempts:3,neurons:isOpenAI ? 0 : 6,unmeasuredAttempts:isOpenAI ? 3 : 0});
+  const openAI=await(await SELF.fetch(`${base}/openai-usage`,{headers})).json<any>();
+  expect(openAI.totals).toEqual({inputTokens:isOpenAI ? 15 : 0,outputTokens:isOpenAI ? 6 : 0,
+    totalTokens:isOpenAI ? 21 : 0,attempts:isOpenAI ? 3 : 0,unmeasuredAttempts:0});
 });
 
 it("runs tool -> durable outbox -> Queue consumer -> real tools RPC -> persisted follow-up and usage",async()=>{

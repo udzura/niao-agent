@@ -2,8 +2,9 @@ import {Agent, getAgentByName} from "agents";
 import {z} from "zod";
 import type {NiaoAgent} from "../../worker/src/niao-agent";
 import {reportEnvelope,reportLifetime,draftReview,type DraftReview,type ReportJob} from "../../worker/src/journal-agent-jobs";
-import {WorkersAIModel,type ChatModel,type InferenceObserver} from "../../worker/src/model";
+import {WorkersAIModel,usesOpenAIGateway,type ChatModel,type ConversationMessage,type InferenceObserver,type JournalModelID} from "../../worker/src/model";
 import type {AdditionalTool} from "../../worker/src/past-logs";
+import type {OpenAIModelUsage} from "../../worker/src/openai-usage";
 import {latestRelease,localTool,withJournalMcp} from "./tools";
 import {JOURNAL_MODEL,JOURNAL_USAGE_RATES,measureUsage,numericUsage,type JournalUsageSnapshot} from "./usage";
 export {JOURNAL_MODEL} from "./usage";
@@ -54,12 +55,15 @@ export class JournalAgent extends Agent<Env> {
     // Keep tiny result receipts for Queue delivery/replay; drop all conversation context.
     this.sql`UPDATE report_turns SET context=NULL,review=NULL,draftId=NULL,draftUpdatedAt=NULL,publication=NULL,result='日報セッションの12時間の有効期限が切れました。'`;
   }
-  protected createModel(tools:AdditionalTool[],checkpoint:(messages:any[])=>void,observer?:InferenceObserver):ChatModel {
-    return new WorkersAIModel(this.env.AI,JOURNAL_MODEL,undefined,false,tools,
-      {maxCompletionTokens:8192,maxRounds:maxInferenceRounds,maxToolCalls:24,maxToolArgumentChars:64000,onConversation:checkpoint,observer});
+  protected createModel(tools:AdditionalTool[],checkpoint:(messages:ConversationMessage[])=>void,observer?:InferenceObserver,
+    config:{modelId:JournalModelID;openAIGatewayId?:string}={modelId:JOURNAL_MODEL}):ChatModel {
+    return new WorkersAIModel(this.env.AI,config.modelId,undefined,false,tools,
+      {maxCompletionTokens:8192,maxRounds:maxInferenceRounds,maxToolCalls:24,maxToolArgumentChars:64000,
+        onConversation:checkpoint,observer,openAIGatewayId:config.openAIGatewayId});
   }
-  private usageObserver(jobId:string):InferenceObserver {
+  private usageObserver(jobId:string,modelId:JournalModelID):InferenceObserver {
     const attempts=new Map<number,string>();
+    const rates=modelId===JOURNAL_MODEL ? JOURNAL_USAGE_RATES : null;
     return {
       started:round=>{
         // A Queue replay/eviction must not reset the per-job inference budget.
@@ -67,13 +71,13 @@ export class JournalAgent extends Agent<Env> {
           throw Error("journal_inference_limit");
         const id=crypto.randomUUID();attempts.set(round,id);
         this.sql`INSERT INTO report_usage_attempts(id,jobId,model,round,startedAt,status,source,usage,rates)
-          VALUES (${id},${jobId},${JOURNAL_MODEL},${round},${new Date().toISOString()},'running','unavailable','{}',${JSON.stringify(JOURNAL_USAGE_RATES)})`;
+          VALUES (${id},${jobId},${modelId},${round},${new Date().toISOString()},'running','unavailable','{}',${JSON.stringify(rates)})`;
       },
       usage:(round,sample)=>{
         const id=attempts.get(round);if(!id)throw Error("usage_attempt_missing");
         const previous=this.sql<{usage:string}>`SELECT usage FROM report_usage_attempts WHERE id=${id}`[0];
         // Stream samples are cumulative within one inference: replace, never add.
-        const usage={...JSON.parse(previous.usage),...numericUsage(sample)},measurement=measureUsage(usage);
+        const usage={...JSON.parse(previous.usage),...numericUsage(sample)},measurement=measureUsage(usage,rates);
         this.sql`UPDATE report_usage_attempts SET usage=${JSON.stringify(usage)},inputTokens=${usage.prompt_tokens ?? null},
           outputTokens=${usage.completion_tokens ?? null},totalTokens=${usage.total_tokens ?? null},
           neurons=${measurement.neurons},source=${measurement.source} WHERE id=${id}`;
@@ -85,13 +89,16 @@ export class JournalAgent extends Agent<Env> {
     const options=z.strictObject({jobId:z.uuid().optional(),before:z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).default(0),
       limit:z.number().int().min(1).max(100).default(50),summaryOnly:z.boolean().default(false)}).parse(input);
     const jobId=options.jobId ?? null;
-    const totals=this.sql<{attempts:number;incompleteAttempts:number;unmeasuredAttempts:number;reportedAttempts:number;estimatedAttempts:number;reportedNeurons:number;estimatedNeurons:number;inputTokens:number;outputTokens:number}>`
+    const totals=this.sql<Pick<JournalUsageSnapshot["summary"],"attempts"|"incompleteAttempts"|"unmeasuredAttempts"|
+      "reportedAttempts"|"estimatedAttempts"|"reportedNeurons"|"estimatedNeurons"|"inputTokens"|"outputTokens"|"totalTokens"|"tokenUnmeasuredAttempts">>`
       SELECT COUNT(*) AS attempts,COALESCE(SUM(status!='completed'),0) AS incompleteAttempts,
       COALESCE(SUM(neurons IS NULL),0) AS unmeasuredAttempts,
       COALESCE(SUM(source='reported'),0) AS reportedAttempts,COALESCE(SUM(source='estimated'),0) AS estimatedAttempts,
       COALESCE(SUM(CASE WHEN source='reported' THEN neurons ELSE 0 END),0) AS reportedNeurons,
       COALESCE(SUM(CASE WHEN source='estimated' THEN neurons ELSE 0 END),0) AS estimatedNeurons,
-      COALESCE(SUM(inputTokens),0) AS inputTokens,COALESCE(SUM(outputTokens),0) AS outputTokens
+      COALESCE(SUM(inputTokens),0) AS inputTokens,COALESCE(SUM(outputTokens),0) AS outputTokens,
+      COALESCE(SUM(COALESCE(totalTokens,COALESCE(inputTokens,0)+COALESCE(outputTokens,0))),0) AS totalTokens,
+      COALESCE(SUM(inputTokens IS NULL OR outputTokens IS NULL),0) AS tokenUnmeasuredAttempts
       FROM report_usage_attempts WHERE (${jobId} IS NULL OR jobId=${jobId})`[0];
     const jobs=this.sql<{trackedJobs:number;unfinishedJobs:number}>`SELECT COUNT(*) AS trackedJobs,COALESCE(SUM(finishedAt IS NULL),0) AS unfinishedJobs
       FROM report_usage_jobs WHERE (${jobId} IS NULL OR jobId=${jobId})`[0];
@@ -109,6 +116,14 @@ export class JournalAgent extends Agent<Env> {
       summary:{...totals,...jobs,untrackedJobs,complete,source,neurons:complete ? recordedNeurons : null,recordedNeurons},
       ...(options.summaryOnly ? {} : {attempts:page.map(({rates,...row})=>({...row,rates:JSON.parse(rates)})),hasMore:attempts.length>options.limit,nextCursor:page.at(-1)?.cursor ?? null})};
   }
+  async openAIUsage(dayStart:string,dayEnd:string):Promise<OpenAIModelUsage[]> {
+    return this.sql<OpenAIModelUsage>`
+      SELECT model AS modelId, COALESCE(SUM(inputTokens),0) AS inputTokens, COALESCE(SUM(outputTokens),0) AS outputTokens,
+        COALESCE(SUM(COALESCE(totalTokens,COALESCE(inputTokens,0)+COALESCE(outputTokens,0))),0) AS totalTokens,
+        COUNT(*) AS attempts, SUM(inputTokens IS NULL OR outputTokens IS NULL) AS unmeasuredAttempts
+      FROM report_usage_attempts WHERE startedAt >= ${dayStart} AND startedAt < ${dayEnd}
+        AND model GLOB 'openai/*' GROUP BY model`;
+  }
   private checkLive(){const row=this.sql<{expiresAt:number}>`SELECT expiresAt FROM report_meta WHERE id=1`[0];
     if(!row || row.expiresAt<=Date.now())throw Error("report_session_expired");}
   async result(jobId:string){return this.sql<{result:string|null}>`SELECT result FROM report_turns WHERE id=${jobId}`[0]?.result ?? null;}
@@ -118,7 +133,7 @@ export class JournalAgent extends Agent<Env> {
     const row=this.sql<{review:string|null}>`SELECT review FROM report_turns WHERE id=${jobId}`[0];
     return row?.review ? draftReview.parse(JSON.parse(row.review)) : null;
   }
-  async run(job:ReportJob):Promise<string> {
+  async run(job:ReportJob,openAIGatewayId?:string):Promise<string> {
     z.uuid().parse(job.id);z.uuid().parse(job.reportSessionId);
     const prior=await this.result(job.id);if(prior)return prior;
     if(this.active)throw Error("report_busy");
@@ -139,7 +154,7 @@ export class JournalAgent extends Agent<Env> {
       const remaining=Math.min(6*60000,job.expiresAt-Date.now());
       let timer:ReturnType<typeof setTimeout>|undefined;
       const deadline=new Promise<never>((_,reject)=>{timer=setTimeout(()=>{controller.abort();reject(Error("report_timeout"));},remaining);});
-      try{return await Promise.race([this.perform(job,controller.signal),deadline]);}
+      try{return await Promise.race([this.perform(job,controller.signal,openAIGatewayId),deadline]);}
       catch(error){this.onRunError(error);return this.finish(job.id,job.approval
         ? "公開処理の完了を確認できませんでした。すでに公開されている可能性があるため、Journalで状態を確認してください。"
         : "日報エージェントの処理を完了できませんでした。保存済みの下書きがある場合は確認し、必要なら再度指示してください。");}
@@ -154,7 +169,7 @@ export class JournalAgent extends Agent<Env> {
     this.sql`UPDATE report_usage_jobs SET finishedAt=${new Date().toISOString()} WHERE jobId=${id}`;
     return text;
   }
-  private async perform(job:ReportJob,signal:AbortSignal) {
+  private async perform(job:ReportJob,signal:AbortSignal,openAIGatewayId?:string) {
     const main=await getAgentByName(this.env.NiaoAgent,"personal");
     const approval=await main.journalPublicationApproval(job.id);
     if(job.approval && !approval)return this.finish(job.id,"公開指示の有効期限が切れました。もう一度指示してください。");
@@ -229,7 +244,7 @@ export class JournalAgent extends Agent<Env> {
         z.strictObject({afterSeq:z.number().int().nonnegative().default(0),limit:z.number().int().min(1).max(100).default(50),messageSeq:z.number().int().positive().optional(),offset:z.number().int().nonnegative().default(0)}),
         async(args)=>({untrusted_reference_data:true,...(args.messageSeq ? await main.journalChatMessage(job.id,args.messageSeq as number,args.offset as number) : await main.journalChatSnapshot(job.id,args.afterSeq as number,args.limit as number))}))].map(wrap);
     return withJournalMcp(this.env,signal,wrap,async tools=>{
-      const checkpoint=(conversation:any[])=>{
+      const checkpoint=(conversation:ConversationMessage[])=>{
         this.checkLive();signal.throwIfAborted();
         const clean=conversation.filter(m=>m.role!=="system"), json=JSON.stringify(clean);
         if(json.length>400000)throw Error("report_context_full");
@@ -240,7 +255,10 @@ export class JournalAgent extends Agent<Env> {
       };
       const last=messages.at(-1);
       if(!(existing?.context && last?.role==="assistant" && !last.tool_calls)){
-        const model=this.createModel([...local,...tools],checkpoint,this.usageObserver(job.id));
+        const modelId=job.modelId ?? JOURNAL_MODEL;
+        if(usesOpenAIGateway(modelId) && !openAIGatewayId)
+          return this.finish(job.id,"日報モデルの AI Gateway が未設定です。設定を見直してから再度指示してください。");
+        const model=this.createModel([...local,...tools],checkpoint,this.usageObserver(job.id,modelId),{modelId,openAIGatewayId});
         const policy=approval ? "今回のジョブには明示的な公開指示があります。対象を保存・修正した後、公開まで進めてください。" : "今回のジョブには公開指示がありません。下書きの保存までにしてください。";
         for await(const _event of model.stream([{role:"system",content:`${instruction}\n${policy}`},...messages],signal)){this.checkLive();signal.throwIfAborted();}
       }
@@ -310,7 +328,7 @@ export default {
         if(claim.action==="skip"){message.ack();continue;}
         if(claim.action==="busy"){message.retry({delaySeconds:300});continue;}
         const agent=await getAgentByName(env.JournalAgent,claim.job.reportSessionId);
-        await agent.run(claim.job);
+        await agent.run(claim.job,claim.openAIGatewayId);
         await env.JOURNAL_RESULTS.send({v:1,kind:"journal_agent_result",jobId:claim.job.id,reportSessionId:claim.job.reportSessionId});
         message.ack();
       }catch{console.warn(JSON.stringify({event:"journal_agent.queue_retry",jobId:parsed.data.jobId}));message.retry({delaySeconds:300});}

@@ -26,6 +26,8 @@ struct JournalUsageSummary: Decodable {
     let estimatedNeurons: Double
     let inputTokens: Int
     let outputTokens: Int
+    let totalTokens: Int?
+    let tokenUnmeasuredAttempts: Int?
     let untrackedJobs: Int
     let complete: Bool
     let source: String
@@ -33,6 +35,7 @@ struct JournalUsageSummary: Decodable {
     let recordedNeurons: Double
 
     var confirmedTotal: Double? { complete ? neurons : nil }
+    var recordedTokens: Int { totalTokens ?? (inputTokens + outputTokens) }
     var sourceLabel: String {
         switch source {
         case "reported": "API返却値"

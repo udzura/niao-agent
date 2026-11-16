@@ -18,8 +18,16 @@ final class JournalUsageTests: XCTestCase {
         XCTAssertEqual(value.summary.reportedNeurons, 3)
         XCTAssertEqual(value.summary.estimatedNeurons, 1.45456)
         XCTAssertEqual(value.summary.sourceLabel, "返却値と推定値")
+        XCTAssertEqual(value.summary.recordedTokens, 270)
+        XCTAssertNil(value.summary.tokenUnmeasuredAttempts)
         XCTAssertEqual(value.attempts[0].sourceLabel, "推定値")
         XCTAssertEqual(value.attempts[0].inputTokens, 100)
+    }
+    func testTokenSummaryUsesReportedTotalWhenTokenBreakdownIsPartial() throws {
+        let raw = summary.replacingOccurrences(of: #""outputTokens":50"#, with: #""outputTokens":50,"totalTokens":310,"tokenUnmeasuredAttempts":1"#)
+        let value = try JSONDecoder().decode(JournalUsageSummary.self, from: Data(raw.utf8))
+        XCTAssertEqual(value.recordedTokens, 310)
+        XCTAssertEqual(value.tokenUnmeasuredAttempts, 1)
     }
     func testIncompleteUsageNeverDisplaysRecordedAmountAsTheTotal() throws {
         let raw = summary.replacingOccurrences(of: #""complete":true"#, with: #""complete":false"#)

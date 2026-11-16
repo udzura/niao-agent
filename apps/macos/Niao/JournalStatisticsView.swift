@@ -15,7 +15,7 @@ struct JournalStatisticsView: View {
                     Button { refresh() } label: { Label("更新", systemImage: "arrow.clockwise") }
                         .disabled(!store.connected || loading)
                 }
-                Text("日報のAI推論だけを集計します。表示はセッション／ジョブの累計で、アカウント全体のNeuronsにも含まれます。")
+                Text("日報のAI推論をセッション／ジョブごとに集計します。")
                     .font(.caption).foregroundStyle(.secondary)
                 if detailVisible {
                     HStack {
@@ -46,9 +46,10 @@ struct JournalStatisticsView: View {
                                         Text(summary.sourceLabel).font(.caption).foregroundStyle(.secondary)
                                     }
                                     if !summary.complete {
-                                        Text("記録できた分: \(amount(summary.recordedNeurons))。総使用量は未確定です。")
+                                        Text("記録済み \(amount(summary.recordedNeurons))")
                                             .font(.caption).foregroundStyle(.secondary)
                                     }
+                                    tokenSummary(summary)
                                 } else { Text("使用量を取得できませんでした").foregroundStyle(.secondary) }
                                 Text("セッション \(session.id.prefix(8))").font(.caption).foregroundStyle(.secondary)
                             }.padding(14).frame(maxWidth: .infinity, alignment: .leading)
@@ -71,6 +72,17 @@ struct JournalStatisticsView: View {
         }
         .task { if store.connected { refresh() } }
         .onChange(of: store.connected) { _, connected in if connected { refresh() } }
+    }
+    private func tokenSummary(_ summary: JournalUsageSummary) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            LabeledContent("トークン（記録済み）", value: "\(summary.recordedTokens.formatted()) tokens")
+            Text("入力 \(summary.inputTokens.formatted()) / 出力 \(summary.outputTokens.formatted())")
+                .font(.caption).foregroundStyle(.secondary)
+            if let missing = summary.tokenUnmeasuredAttempts, missing > 0 {
+                Text("内訳未取得・一部取得 \(missing.formatted()) 回")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }.monospacedDigit()
     }
     @ViewBuilder private func detailContent(_ detail: JournalUsageDetail) -> some View {
         JournalUsageSummaryView(summary: detail.summary, job: detail.jobId != nil)

@@ -2,7 +2,9 @@ import {env,applyD1Migrations,reset,runInDurableObject,evictDurableObject} from 
 import {getAgentByName} from "agents";
 import {beforeEach,afterEach,expect,it} from "vitest";
 import mainWorker from "../../worker/src/index";
+import journalWorker from "../src/index";
 import {measureUsage} from "../src/usage";
+import {tokyoDay} from "../../worker/src/openai-usage";
 const bindings=env as any,token="journal-usage-test-token-000000000000000";
 const base="https://test/agents/niao-agent/personal/journal-usage";
 const api=(query="",init:RequestInit={headers:{Authorization:`Bearer ${token}`}})=>mainWorker.fetch(new Request(base+query,init),{...bindings,NIAO_TOKEN:token});
@@ -20,6 +22,80 @@ async function prepareJob(){
   const claim=await main.claimJournalAgentJob(receipt.jobId);if(claim.action!=="run")throw Error("missing job");
   return {main,job:claim.job,report:await getAgentByName(bindings.JournalAgent,receipt.reportSessionId)};
 }
+it("runs a queued OpenAI journal job with the model selected when it was accepted",async()=>{
+  const main=await getAgentByName(bindings.NiaoAgent,"personal");
+  const gatewayId="test-journal-gateway",gemma="@cf/google/gemma-4-26b-a4b-it";
+  const modelId="openai/gpt-6.1-terra",envelopes:unknown[]=[];
+  const configure=(update:unknown)=>mainWorker.fetch(new Request(base.replace(/journal-usage$/, "settings"),{
+    method:"PUT",headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json"},body:JSON.stringify(update),
+  }),{...bindings,NIAO_TOKEN:token});
+  await runInDurableObject(main,(a:any)=>{
+    a.env.OPENAI_GATEWAY_ID=gatewayId;
+    a.env.JOURNAL_PROMPTS={send:async(body:unknown)=>{envelopes.push(body);}};
+  });
+  const rejected=await configure({modelId:"openai/gpt-6-luna",journalModelId:"openai/gpt-4.1-mini"});
+  expect(rejected.status).toBe(400);await rejected.text();
+  const response=await configure({journalModelId:modelId});
+  expect(response.status).toBe(200);
+  const settings=await response.json<any>();
+  expect(settings.modelId).toBe(gemma);
+  expect(settings.journalModelId).toBe(modelId);
+  const gpt6=["openai/gpt-6-luna",modelId,"openai/gpt-6.1-sol"];
+  expect(settings.journalModels.map((model:{id:string})=>model.id)).toEqual([gemma,...gpt6]);
+  expect(settings.models.map((model:{id:string})=>model.id)).toEqual(expect.arrayContaining(gpt6));
+  expect(JSON.stringify(settings)).not.toContain(gatewayId);
+  const receipt=await runInDurableObject(main,async(a:any)=>{
+    a.active={requestId:crypto.randomUUID(),sessionId:"legacy"};
+    try{return await a.enqueueJournalAgent({prompt:"日報を書いて"},a.active.requestId,0);}
+    finally{a.active=null;}
+  });
+  expect(envelopes).toEqual([{v:1,kind:"journal_agent",jobId:receipt.jobId}]);
+  const changed=await configure({journalModelId:gemma});
+  expect(changed.status).toBe(200);await changed.text();
+  const report=await getAgentByName(bindings.JournalAgent,receipt.reportSessionId);
+  await runInDurableObject(report,(a:any)=>{
+    a.onRunError=(error:unknown)=>{throw error;};
+    a.env.AI={run:async(selected:string,input:any,options:AiOptions)=>{
+      expect(selected).toBe(modelId);
+      expect(options).toMatchObject({gateway:{id:gatewayId},extraHeaders:{"cf-aig-no-wholesale":"true"}});
+      expect(input.max_output_tokens).toBe(8192);
+      expect(input.tools).toContainEqual(expect.objectContaining({type:"function",name:"journal_create_draft"}));
+      return sse([{type:"response.output_text.delta",delta:"日報の結果"},
+        {type:"response.completed",response:{output:[],usage:{input_tokens:100,output_tokens:20,total_tokens:120}}}],false);
+    }};
+  });
+  let acknowledged=false;
+  await journalWorker.queue({messages:[{body:envelopes[0],ack:()=>{acknowledged=true;},retry:()=>{throw Error("unexpected retry");}}]} as any,
+    {...bindings,JOURNAL_RESULTS:{send:async()=>{}}});
+  expect(acknowledged).toBe(true);
+  expect(await report.result(receipt.jobId)).toBe("日報の結果");
+  const snapshot=await report.usage({jobId:receipt.jobId});
+  expect(snapshot.attempts).toMatchObject([{model:modelId,inputTokens:100,outputTokens:20,neurons:null,rates:null,status:"completed"}]);
+  const list=await (await api()).json<any>();
+  expect(list.sessions).toMatchObject([{reportSessionId:receipt.reportSessionId,
+    summary:{inputTokens:100,outputTokens:20,totalTokens:120,tokenUnmeasuredAttempts:0}}]);
+  expect(JSON.stringify(snapshot)).not.toContain(gatewayId);
+
+  const period=tokyoDay(new Date());
+  await runInDurableObject(main,(a:any)=>{
+    a.sql`INSERT INTO niao_usage_attempts(id,startedAt,modelId,inputTokens,outputTokens,totalTokens)
+      VALUES ('chat',${period.dayStart},${modelId},7,3,10)`;
+  });
+  await runInDurableObject(report,(a:any)=>{
+    const before=new Date(Date.parse(period.dayStart)-1).toISOString();
+    a.sql`INSERT INTO report_usage_attempts
+      SELECT 'previous',jobId,model,round,${before},finishedAt,status,inputTokens,outputTokens,totalTokens,neurons,source,usage,rates
+      FROM report_usage_attempts LIMIT 1`;
+  });
+  const dailyResponse=await mainWorker.fetch(new Request(base.replace(/journal-usage$/, "openai-usage"),{
+    headers:{Authorization:`Bearer ${token}`},
+  }),{...bindings,NIAO_TOKEN:token});
+  expect(dailyResponse.status).toBe(200);
+  const daily=await dailyResponse.json<any>();
+  expect(daily.journalUnavailableSessions).toBe(0);
+  expect(daily.totals).toEqual({inputTokens:107,outputTokens:23,totalTokens:130,attempts:2,unmeasuredAttempts:0});
+  expect(daily.models).toEqual([{modelId,...daily.totals}]);
+});
 it("counts each inference once, distinguishes reported/estimated neurons, and exposes private authenticated usage after expiry",async()=>{
   const {main,report,job}=await prepareJob();
   await runInDurableObject(report,async(a:any)=>{
@@ -37,7 +113,8 @@ it("counts each inference once, distinguishes reported/estimated neurons, and ex
   });
   const response=await api(`?jobId=${job.id}`);expect(response.status).toBe(200);expect(response.headers.get("Cache-Control")).toBe("no-store");
   const snapshot=await response.json<any>();
-  expect(snapshot.summary).toMatchObject({attempts:2,inputTokens:220,outputTokens:50,reportedAttempts:1,estimatedAttempts:1,reportedNeurons:3,complete:true,source:"mixed"});
+  expect(snapshot.summary).toMatchObject({attempts:2,inputTokens:220,outputTokens:50,totalTokens:270,tokenUnmeasuredAttempts:0,
+    reportedAttempts:1,estimatedAttempts:1,reportedNeurons:3,complete:true,source:"mixed"});
   expect(snapshot.summary.estimatedNeurons).toBeCloseTo(1.45456,5);expect(snapshot.summary.neurons).toBeCloseTo(4.45456,5);
   expect(snapshot.attempts.map((a:any)=>a.model)).toEqual(["@cf/google/gemma-4-26b-a4b-it","@cf/google/gemma-4-26b-a4b-it"]);
   expect(JSON.stringify(snapshot)).not.toMatch(/PRIVATE-|sourceRef|prompt_tokens/);
@@ -86,6 +163,8 @@ it.each(["no_usage","partial_stream","provider_failure"])("does not report missi
   const snapshot=await (await api(`?jobId=${job.id}`)).json<any>();
   expect(snapshot.summary).toMatchObject({attempts:1,complete:false,neurons:null});
   expect(snapshot.summary.unmeasuredAttempts).toBe(mode==="partial_stream" ? 0 : 1);
+  expect(snapshot.summary.tokenUnmeasuredAttempts).toBe(mode==="partial_stream" ? 0 : 1);
+  expect(snapshot.summary.totalTokens).toBe(mode==="partial_stream" ? 30 : 0);
   expect(snapshot.summary.incompleteAttempts).toBe(mode==="no_usage" ? 0 : 1);
   expect(JSON.stringify(snapshot)).not.toContain("PRIVATE-ERROR");
 });

@@ -3,30 +3,62 @@ import { rubyTool, type RubyExecutor } from "./ruby/tool";
 import { ChatError } from "./protocol";
 import { workersAIError } from "./ai-errors";
 import type { AdditionalTool } from "./past-logs";
+import { parseResponsesSSE, responsesInput, type ResponsesReasoningItem } from "./openai-responses";
+import { readSSE } from "./sse";
 
-export const OPENAI_BYOK_MODEL = "openai/gpt-4.1-mini";
+const gemma = { id: "@cf/google/gemma-4-26b-a4b-it", name: "Gemma 4 · 26B A4B", supportsThinking: true } as const;
+const reasoningEfforts = ["low", "medium", "high", "xhigh", "max"] as const;
+const reasoningEffortsWithOff = ["none", ...reasoningEfforts] as const;
+export type OpenAIReasoningEffort = typeof reasoningEffortsWithOff[number];
+const responsesOutputLimits: Record<OpenAIReasoningEffort, number> = {
+  none: 4096, low: 4096, medium: 8192, high: 16384, xhigh: 25000, max: 25000,
+};
+const gpt6Models = [
+  { id: "openai/gpt-6-luna", name: "GPT-6 Luna", supportsThinking: false, reasoningEfforts: reasoningEffortsWithOff },
+  { id: "openai/gpt-6.1-terra", name: "GPT-6.1 Terra", supportsThinking: false, reasoningEfforts: reasoningEffortsWithOff },
+  { id: "openai/gpt-6.1-sol", name: "GPT-6.1 Sol", supportsThinking: false, reasoningEfforts },
+] as const;
 export const MODELS = [
-  { id: "@cf/google/gemma-4-26b-a4b-it", name: "Gemma 4 · 26B A4B", supportsThinking: true },
+  gemma,
   { id: "@cf/zai-org/glm-4.7-flash", name: "GLM 4.7 Flash", supportsThinking: false },
   { id: "@cf/ibm-granite/granite-4.0-h-micro", name: "Granite 4.0 H Micro", supportsThinking: false },
   { id: "@cf/meta/llama-3.3-70b-instruct-fp8-fast", name: "Llama 3.3 · 70B Fast", supportsThinking: false },
   { id: "@cf/meta/llama-4-scout-17b-16e-instruct", name: "Llama 4 Scout · 17B-16E", supportsThinking: false },
   { id: "@cf/qwen/qwen3-30b-a3b-fp8", name: "Qwen3 · 30B A3B FP8", supportsThinking: true },
   { id: "@cf/qwen/qwen3.8-27b", name: "Qwen 3.8 · 27B", supportsThinking: true },
-  { id: OPENAI_BYOK_MODEL, name: "GPT-4.1 mini", supportsThinking: false },
+  { id: "openai/gpt-4.1-mini", name: "GPT-4.1 mini", supportsThinking: false },
+  ...gpt6Models,
 ] as const;
+export const JOURNAL_MODELS = [gemma, ...gpt6Models] as const;
+export type JournalModelID = typeof JOURNAL_MODELS[number]["id"];
+export const DEFAULT_JOURNAL_MODEL = gemma.id;
 export type ModelID = typeof MODELS[number]["id"];
 export const DEFAULT_MODEL: ModelID = MODELS[0].id;
+export function usesOpenAIGateway(modelId: ModelID): boolean {
+  return modelId.startsWith("openai/");
+}
+export function isJournalModelID(value: unknown): value is JournalModelID {
+  return JOURNAL_MODELS.some(model => model.id === value);
+}
 export function isModelID(value: unknown): value is ModelID {
   return MODELS.some(model => model.id === value);
 }
 export function supportsThinking(modelId: ModelID): boolean {
   return MODELS.find(model => model.id === modelId)?.supportsThinking ?? false;
 }
+function supportedOpenAIReasoningEfforts(modelId: ModelID): readonly OpenAIReasoningEffort[] | undefined {
+  return gpt6Models.find(model => model.id === modelId)?.reasoningEfforts;
+}
+export function isOpenAIReasoningEffort(modelId: ModelID, value: unknown): value is OpenAIReasoningEffort {
+  return supportedOpenAIReasoningEfforts(modelId)?.some(effort => effort === value) ?? false;
+}
+export function openAIReasoningEffort(modelId: ModelID, saved: unknown): OpenAIReasoningEffort | undefined {
+  return isOpenAIReasoningEffort(modelId, saved) ? saved : supportedOpenAIReasoningEfforts(modelId)?.[0];
+}
 // Auto presets control whether to think, not reasoning depth. Keep the enabled
 // Qwen effort explicit instead of inheriting its expensive xhigh default.
 export function modelThinkingOptions(modelId: ModelID, enabled: boolean) {
-  if (modelId === OPENAI_BYOK_MODEL) return {max_completion_tokens:2048};
+  if (usesOpenAIGateway(modelId)) return {max_completion_tokens:2048};
   // Qwen3's published Workers AI schema uses max_tokens and has no documented
   // template/effort options. Its per-turn soft switch is added to messages below.
   if (modelId === "@cf/qwen/qwen3-30b-a3b-fp8") return {max_tokens:enabled ? 4096 : 2048};
@@ -44,9 +76,18 @@ export function modelThinkingOptions(modelId: ModelID, enabled: boolean) {
 }
 export type ModelMessage = { role: "system" | "user" | "assistant"; content: string };
 export type ToolCall = { id: string; type: "function"; function: { name: string; arguments: string } };
+export type ConversationMessage = ModelMessage | {
+  role: "assistant"; content: string | null; tool_calls: ToolCall[];
+  responseReasoning?: {modelId: ModelID; items: ResponsesReasoningItem[]};
+} | {role: "tool"; tool_call_id: string; content: string};
+function withoutResponseReasoning(message: ConversationMessage): ConversationMessage {
+  if (!("responseReasoning" in message)) return message;
+  const {responseReasoning, ...publicMessage} = message;
+  return publicMessage;
+}
 export type ModelEvent = { thinking: { generation: number; text: string; active: boolean } } | { text: string } | { usage: Record<string, number> } | { toolDelta: any[] } | { inferenceStarted: true } | { toolStatus: "running" | "completed"; name?: string };
 export interface ChatModel {
-  stream(messages: ModelMessage[], signal: AbortSignal): AsyncIterable<ModelEvent>;
+  stream(messages: ConversationMessage[], signal: AbortSignal): AsyncIterable<ModelEvent>;
 }
 export interface InferenceObserver {
   started(round:number):void;
@@ -57,10 +98,10 @@ export interface InferenceObserver {
 // The only module aware of the AI binding's model-specific inputs and SSE format.
 export class WorkersAIModel implements ChatModel {
   constructor(private ai: Ai, private modelId: ModelID, private executeRuby?: RubyExecutor, private thinkingEnabled = false,
-    private additionalTools: AdditionalTool[] = [], private options: {reasoningEffort?: "xhigh"; maxCompletionTokens?:number; maxRounds?: number; maxToolCalls?: number; maxToolArgumentChars?:number; onConversation?: (messages: any[]) => void; observer?:InferenceObserver; openAIGatewayId?:string} = {}) { }
-  async *stream(messages: ModelMessage[], signal: AbortSignal): AsyncIterable<ModelEvent> {
+    private additionalTools: AdditionalTool[] = [], private options: {reasoningEffort?: "xhigh"; maxCompletionTokens?:number; maxRounds?: number; maxToolCalls?: number; maxToolArgumentChars?:number; onConversation?: (messages: ConversationMessage[]) => void; observer?:InferenceObserver; openAIGatewayId?:string; openAIReasoningEffort?:OpenAIReasoningEffort} = {}) { }
+  async *stream(messages: ConversationMessage[], signal: AbortSignal): AsyncIterable<ModelEvent> {
     const runOptions: AiOptions = { signal };
-    if (this.modelId === OPENAI_BYOK_MODEL) {
+    if (usesOpenAIGateway(this.modelId)) {
       const gatewayId = this.options.openAIGatewayId;
       if (!gatewayId) throw new ChatError("ai_unavailable", {
         provider: "cloudflare", reason: "unknown", message: "OPENAI_GATEWAY_ID is required for this model.",
@@ -68,7 +109,8 @@ export class WorkersAIModel implements ChatModel {
       runOptions.gateway = { id: gatewayId, skipCache: true };
       runOptions.extraHeaders = { "cf-aig-no-wholesale": "true" };
     }
-    const conversation: any[] = [...messages];
+    const responsesEffort = openAIReasoningEffort(this.modelId, this.options.openAIReasoningEffort);
+    const conversation: ConversationMessage[] = [...messages];
     if (this.modelId === "@cf/qwen/qwen3-30b-a3b-fp8") {
       let index=conversation.length-1;
       while (index >= 0 && conversation[index].role !== "user") index--;
@@ -107,20 +149,25 @@ export class WorkersAIModel implements ChatModel {
       if (round) yield { inferenceStarted: true };
       const started = Date.now();
       this.options.observer?.started(round);
-      // Select the string overload for both Workers AI and Gateway catalog IDs.
-      const result = await this.ai.run<string>(this.modelId, {
-        messages: conversation, stream: true,
+      const toolChoice = round === rounds - 1 ? "none" : "auto";
+      const input = responsesEffort ? responsesInput(this.modelId, conversation, tools, toolChoice, responsesEffort,
+        this.options.maxCompletionTokens ?? responsesOutputLimits[responsesEffort]) : {
+        messages: conversation.map(withoutResponseReasoning),
+        stream: true,
         ...modelThinkingOptions(this.modelId, this.thinkingEnabled),
         ...(this.options.reasoningEffort ? {reasoning_effort: this.options.reasoningEffort, max_completion_tokens: 16384} : {}),
         ...(this.options.maxCompletionTokens ? {max_completion_tokens:this.options.maxCompletionTokens} : {}),
         stream_options: { include_usage: true },
-        ...(tools.length ? { tools, parallel_tool_calls: false, tool_choice: round === rounds - 1 ? "none" : "auto" } : {}),
-      }, runOptions).catch(error => { throw workersAIError(error); });
+        ...(tools.length ? { tools, parallel_tool_calls: false, tool_choice: toolChoice } : {}),
+      };
+      // Select the string overload for both Workers AI and Gateway catalog IDs.
+      const result = await this.ai.run<string>(this.modelId, input, runOptions).catch(error => { throw workersAIError(error); });
       if (!(result instanceof ReadableStream)) {
         if (result && typeof result === "object" && ("error" in result || "errors" in result)) throw workersAIError(result);
         throw new ChatError("invalid_ai_response");
       }
       const calls = new Map<number, ToolCall>();
+      let reasoningItems: ResponsesReasoningItem[] = [];
       let content = "";
       const adapter = modelOutputAdapter(this.modelId);
       const reasoningAdapter = modelOutputAdapter(this.modelId);
@@ -134,8 +181,11 @@ export class WorkersAIModel implements ChatModel {
         }
         if (output.content) { content += output.content; yield { text: output.content }; }
       };
-      for await (const event of parseSSE(result, signal)) {
-        if ("toolDelta" in event) {
+      const events = responsesEffort ? parseResponsesSSE(result, signal) : parseSSE(result, signal);
+      for await (const event of events) {
+        if ("reasoningItems" in event) {
+          reasoningItems = event.reasoningItems;
+        } else if ("toolDelta" in event) {
           // Tool arguments may contain private draft text; never log them.
           for (const delta of event.toolDelta) {
             if (delta.index > 2) { delta.index = 0; console.log("[Warn] Resetting delta index to 0 due to exceeding max index"); }
@@ -176,13 +226,14 @@ export class WorkersAIModel implements ChatModel {
       console.log(JSON.stringify({ event: "llm.request.complete", model: this.modelId, round, durationMs: Date.now() - started }));
       if (!calls.size) {
         conversation.push({role: "assistant", content});
-        this.options.onConversation?.(conversation);
+        this.options.onConversation?.(conversation.map(withoutResponseReasoning));
         return;
       }
       if (!tools.length || round === rounds - 1 || executions + calls.size > (this.options.maxToolCalls ?? 3)) throw new ChatError("tool_limit");
       const toolCalls = [...calls.values()];
       if (toolCalls.some(c => !c.id) || new Set(toolCalls.map(c => c.id)).size !== toolCalls.length) throw new ChatError("invalid_tool_call", { message: `Invalid tool call IDs`, provider: "cloudflare", reason: "unknown" });
-      conversation.push({ role: "assistant", content: content || null, tool_calls: toolCalls });
+      conversation.push({ role: "assistant", content: content || null, tool_calls: toolCalls,
+        ...(reasoningItems.length ? {responseReasoning:{modelId:this.modelId,items:reasoningItems}} : {}) });
       for (const call of toolCalls) {
         signal.throwIfAborted();
         executions++;
@@ -210,58 +261,24 @@ export class WorkersAIModel implements ChatModel {
   }
 }
 
-// Handles split UTF-8, CRLF, multiple data lines, usage-only chunks, and truncated streams.
 export async function* parseSSE(stream: ReadableStream<Uint8Array>, signal: AbortSignal): AsyncIterable<Exclude<ModelEvent, { thinking: unknown } | { inferenceStarted: unknown } | { toolStatus: unknown }> | { reasoning: string }> {
-  const reader = stream.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let finished = false;
-  const abort = () => { void reader.cancel().catch(() => { }); };
-  signal.addEventListener("abort", abort, { once: true });
-  try {
-    while (true) {
-      signal.throwIfAborted();
-      const { value, done } = await reader.read();
-      signal.throwIfAborted();
-      buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
-      if (buffer.length > 256_000) throw new ChatError("invalid_ai_response");
-      let match: RegExpExecArray | null;
-      while ((match = /\r?\n\r?\n/.exec(buffer))) {
-        const frame = buffer.slice(0, match.index);
-        buffer = buffer.slice(match.index + match[0].length);
-        const data = frame.split(/\r?\n/).filter(l => l.startsWith("data:")).map(l => l.slice(5).trimStart()).join("\n");
-        if (!data) continue;
-        if (data === "[DONE]") { finished = true; break; }
-        let chunk;
-        try { chunk = JSON.parse(data); } catch { throw new ChatError("invalid_ai_response"); }
-        if (chunk.error || chunk.success === false && Array.isArray(chunk.errors) && chunk.errors.length)
-          throw workersAIError(chunk.error ?? chunk);
-        const deltas = chunk.choices?.[0]?.delta?.tool_calls;
-        if (deltas != null) {
-          if (!Array.isArray(deltas)) throw new ChatError("invalid_tool_call", { message: `Invalid tool call deltas: ${JSON.stringify(deltas)}`, provider: "cloudflare", reason: "unknown" });
-          yield { toolDelta: deltas };
-        }
-        const reasoning = chunk.choices?.[0]?.delta?.reasoning_content ?? chunk.choices?.[0]?.delta?.reasoning;
-        if (typeof reasoning === 'string' && reasoning) yield { reasoning };
-        const text = chunk.choices?.[0]?.delta?.content ?? chunk.response;
-        if (typeof text === "string" && text) yield { text };
-        if (chunk.usage) {
-          const usage: Record<string, number> = {};
-          for (const key of ["prompt_tokens", "completion_tokens", "total_tokens", "neurons"]) {
-            if (typeof chunk.usage[key] === "number") usage[key] = chunk.usage[key];
-          }
-          yield { usage };
-        }
-      }
-      if (finished) return;
-      if (done) throw new ChatError("incomplete_ai_stream");
+  for await (const chunk of readSSE(stream, signal)) {
+    const deltas = chunk.choices?.[0]?.delta?.tool_calls;
+    if (deltas != null) {
+      if (!Array.isArray(deltas)) throw new ChatError("invalid_tool_call", { message: `Invalid tool call deltas: ${JSON.stringify(deltas)}`, provider: "cloudflare", reason: "unknown" });
+      yield { toolDelta: deltas };
     }
-  } catch (error) {
-    throw workersAIError(error);
-  } finally {
-    signal.removeEventListener("abort", abort);
-    await reader.cancel().catch(() => { });
-    reader.releaseLock();
+    const reasoning = chunk.choices?.[0]?.delta?.reasoning_content ?? chunk.choices?.[0]?.delta?.reasoning;
+    if (typeof reasoning === 'string' && reasoning) yield { reasoning };
+    const text = chunk.choices?.[0]?.delta?.content ?? chunk.response;
+    if (typeof text === "string" && text) yield { text };
+    if (chunk.usage) {
+      const usage: Record<string, number> = {};
+      for (const key of ["prompt_tokens", "completion_tokens", "total_tokens", "neurons"]) {
+        if (typeof chunk.usage[key] === "number") usage[key] = chunk.usage[key];
+      }
+      yield { usage };
+    }
   }
 }
 
