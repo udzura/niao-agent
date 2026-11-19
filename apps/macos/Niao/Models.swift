@@ -14,6 +14,11 @@ struct ChatMessage: Codable, Identifiable, Equatable {
     let content: String
     let createdAt: String
     var thinking: [ThinkingSegment]? = nil
+
+    var createdDate: Date? {
+        (try? Date.ISO8601FormatStyle(includingFractionalSeconds: true).parse(createdAt))
+            ?? (try? Date.ISO8601FormatStyle().parse(createdAt))
+    }
 }
 struct Turn: Codable {
     let requestId: String

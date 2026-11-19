@@ -705,7 +705,14 @@ struct MessageRow: View {
     let message: ChatMessage
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(message.role == "user" ? "あなた" : "Niao").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                Text(message.role == "user" ? "あなた" : "Niao").fontWeight(.semibold)
+                if let date = message.createdDate {
+                    Text(date, format: .dateTime.year().month().day().hour().minute())
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
             if message.role == "assistant" { ThinkingDisclosureView(segments: message.thinking ?? []) }
             ChatMarkdownView(content: message.content)
         }
